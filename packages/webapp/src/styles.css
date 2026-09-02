@@ -1,0 +1,52 @@
+/* Cloudscape global styles carry the design system; this file only keeps the
+ * login page layout and the markdown artifact renderer (Cloudscape has no
+ * markdown component). Colors are mode-neutral so dark mode stays legible. */
+
+body {
+  margin: 0;
+}
+
+.login-wrap {
+  max-width: 460px;
+  margin: 10vh auto 0;
+  padding: 0 1rem;
+}
+
+.markdown {
+  line-height: 1.6;
+  overflow-wrap: break-word;
+}
+.markdown h1,
+.markdown h2 {
+  border-bottom: 1px solid rgba(128, 128, 128, 0.35);
+  padding-bottom: 0.25rem;
+}
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  padding: 0.3rem 0.6rem;
+  text-align: left;
+}
+.markdown code {
+  background: rgba(128, 128, 128, 0.18);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+}
+.markdown pre {
+  background: #0f1b2a;
+  color: #e6edf3;
+  padding: 0.75rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+.markdown img {
+  max-width: 100%;
+}

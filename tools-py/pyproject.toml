@@ -1,0 +1,10 @@
+[project]
+name = "agentic-platform-tools-py"
+version = "0.1.0"
+description = "Python gateway tools for the agentic platform (stdlib + boto3 only — no bundling)"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

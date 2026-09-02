@@ -1,0 +1,22 @@
+{
+  "name": "currency_rates",
+  "description": "Exchange rates (European Central Bank reference rates, keyless). Returns the latest or a dated set of rates for a base currency against requested symbols. Use for currency conversion context in pricing and export-market analysis.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "base": {
+        "type": "string",
+        "description": "3-letter base currency code (default AUD)"
+      },
+      "symbols": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Quote currencies (default USD, EUR, GBP, CNY)"
+      },
+      "date": {
+        "type": "string",
+        "description": "\"latest\" (default) or a YYYY-MM-DD date for historical rates"
+      }
+    }
+  }
+}

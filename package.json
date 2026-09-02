@@ -1,0 +1,22 @@
+{
+  "name": "agentic-platform",
+  "version": "0.1.0",
+  "license": "MIT-0",
+  "private": true,
+  "description": "Reusable agentic workload platform: AgentCore Harness + Step Functions constructs, plan schema, planner-driven workflows",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build -w @agentic-platform/plan-schema && npm run build -w @agentic-platform/constructs && npm run build -w @agentic-platform/tools && npm run build -w @agentic-platform/api && npm run build -w @agentic-platform/webapp && npm run build -w @agentic-platform/example-marketing-workflow && npm run build -w @agentic-platform/example-second-workload",
+    "test": "npm run build && npm run test -w @agentic-platform/plan-schema && npm run test -w @agentic-platform/constructs && npm run test -w @agentic-platform/tools && npm run test -w @agentic-platform/api && npm run test -w @agentic-platform/example-marketing-workflow && npm run test -w @agentic-platform/example-second-workload"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1139.0",
+    "playwright": "^1.62.1"
+  }
+}

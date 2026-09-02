@@ -1,0 +1,23 @@
+{
+  "name": "@agentic-platform/plan-schema",
+  "version": "0.1.0",
+  "license": "MIT-0",
+  "private": true,
+  "description": "Shared contracts: plan document schema, wave computation, harness config schema, run/task records",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

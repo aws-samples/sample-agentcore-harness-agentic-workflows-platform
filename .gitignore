@@ -1,0 +1,12 @@
+node_modules/
+dist/
+cdk.out/
+coverage/
+.env
+.env.*
+*.tsbuildinfo
+.DS_Store
+.kiro/
+__pycache__/
+*.pyc
+.pytest_cache/
