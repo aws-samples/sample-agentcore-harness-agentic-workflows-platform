@@ -3,6 +3,7 @@ import {
   CHAT_REPORT_MAX_CHARS,
   CHAT_SOURCES_TOTAL_MAX_CHARS,
   buildChatRequest,
+  harnessErrorMessage,
   parseChatAnswer,
 } from '../handlers-src/lib/report-chat';
 
@@ -64,6 +65,17 @@ describe('buildChatRequest', () => {
     expect(text).toContain('[omitted: grounding budget exhausted]');
     const injected = (text.match(/Ω+/g) ?? []).reduce((n, run) => n + run.length, 0);
     expect(injected).toBeLessThanOrEqual(CHAT_SOURCES_TOTAL_MAX_CHARS);
+  });
+});
+
+describe('harnessErrorMessage', () => {
+  it('turns an output-cap failure into an actionable message, everything else into a retry', () => {
+    expect(
+      harnessErrorMessage(
+        new Error('Harness runtime error: Model stopped generating due to maximum token limit.'),
+      ),
+    ).toMatch(/too long to finish in one reply/);
+    expect(harnessErrorMessage(new Error('throttled'))).toMatch(/try again/);
   });
 });
 

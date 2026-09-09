@@ -268,6 +268,20 @@ export async function loadChatMaxTurns(tableName: string): Promise<number> {
     : CHAT_MAX_TURNS_DEFAULT;
 }
 
+/**
+ * User-facing message for a failed harness invocation. The one failure a
+ * user can act on is the output cap: multi-section proposals are long, and
+ * when the model is cut off the fence never closes (live: two rewrites hit
+ * a 6144-token cap). Everything else is a generic retry.
+ */
+export function harnessErrorMessage(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  if (/maximum token limit|max_tokens|MaxTokensReached/i.test(text)) {
+    return 'the proposed changes were too long to finish in one reply — ask for fewer sections at a time, or an admin can raise the report_chat output limit';
+  }
+  return 'the report assistant could not answer right now — please try again';
+}
+
 export function turnLimitError(limit: number): string {
   return `this conversation has reached the ${limit}-turn limit — clear it to keep asking (an admin can raise the limit in Settings)`;
 }

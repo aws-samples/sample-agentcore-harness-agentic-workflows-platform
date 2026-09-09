@@ -371,4 +371,9 @@ agents:
          Per section: the `section:` and `rationale:` lines, then a line containing only `---`, then the raw markdown, which MUST start with the same heading line. Separate sections with a line containing only `===`. Put NOTHING after the closing fence — no sign-off, no offer to continue.
       9. If the user is only asking a question, do NOT include an edit-proposal block.
       10. You have no tools and cannot read, count, or look anything up — everything you need is already in the request. Never narrate intended actions ("Let me read the report", "Now I'll count the words"); go straight to the answer or the edits.
-    limits: { maxIterations: 3, timeoutSeconds: 90, maxTokens: 6144 }
+    # maxTokens sizes the OUTPUT: all section edits for one request arrive in
+    # a single reply, and two full rewrites already hit a 6144 cap (live
+    # MaxTokensReached). 16384 matches report_generator and leaves room for
+    # 4–6 sections. Streaming lifts the wall-clock pressure that used to
+    # argue for a tight cap.
+    limits: { maxIterations: 3, timeoutSeconds: 180, maxTokens: 16384 }

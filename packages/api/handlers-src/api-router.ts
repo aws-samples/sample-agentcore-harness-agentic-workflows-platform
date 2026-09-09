@@ -45,6 +45,7 @@ import { invokeHarnessText } from '@agentic-platform/constructs/dist/handlers-sr
 import {
   chatInvocationArgs,
   finalChatPayload,
+  harnessErrorMessage,
   loadChatContext,
   loadChatMaxTurns,
   reportVersionsOf,
@@ -983,9 +984,7 @@ async function chatAboutReport(
     return json(200, finalChatPayload(raw, loaded.context));
   } catch (error) {
     console.error('chatAboutReport: harness invocation failed', { runId, error });
-    return json(502, {
-      error: 'the report assistant could not answer right now — please try again',
-    });
+    return json(502, { error: harnessErrorMessage(error) });
   }
 }
 

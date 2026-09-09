@@ -31,6 +31,7 @@ import {
   ProposalGate,
   chatInvocationArgs,
   finalChatPayload,
+  harnessErrorMessage,
   loadChatContext,
   loadChatMaxTurns,
   turnLimitError,
@@ -218,7 +219,7 @@ export async function runChatStream(
       sse({
         type: 'error',
         status: 502,
-        error: 'the report assistant could not answer right now — please try again',
+        error: harnessErrorMessage(error),
       }),
     );
   } finally {
