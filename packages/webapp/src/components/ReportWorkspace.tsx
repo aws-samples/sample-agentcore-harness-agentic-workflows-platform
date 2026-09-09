@@ -37,6 +37,7 @@ import {
 import {
   api,
   ApiError,
+  chatAboutReportStream,
   type ChatMessage,
   type ProposedEdit,
   type ReportVersion,
@@ -359,6 +360,8 @@ function ReportChat(props: ReportChatProps) {
   const [chatError, setChatError] = useState<string | null>(null);
   const [answeredVersion, setAnsweredVersion] = useState<number | null>(null);
   const [applied, setApplied] = useState<Set<number>>(new Set());
+  /** In-flight assistant text ('' = waiting for first token; null = idle). */
+  const [streaming, setStreaming] = useState<string | null>(null);
 
   async function send() {
     const question = draft.trim();
@@ -369,12 +372,21 @@ function ReportChat(props: ReportChatProps) {
     setMessages(history);
     setDraft('');
     setChatError(null);
+    setStreaming('');
     setBusy(true);
     try {
-      const { message, reportVersion } = await api.chatAboutReport(runId, history);
+      // Streams visible text as it arrives (D-30); the final reply carries
+      // any edit proposal, which is deliberately never streamed as text.
+      const { message, reportVersion } = await chatAboutReportStream(
+        runId,
+        history,
+        (text) => setStreaming((current) => (current ?? '') + text),
+      );
+      setStreaming(null);
       setMessages((current) => [...current, message]);
       setAnsweredVersion(reportVersion);
     } catch (e) {
+      setStreaming(null);
       if (e instanceof ApiError && e.status === 409) {
         setChatError('The report for this run isn’t available yet.');
       } else if (e instanceof ApiError && e.status === 503) {
@@ -478,7 +490,20 @@ function ReportChat(props: ReportChatProps) {
                 </div>
               </div>
             ))}
-            {busy && <StatusIndicator type="loading">Thinking…</StatusIndicator>}
+            {busy && streaming !== null && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                <div style={{ maxWidth: '85%' }}>
+                  <Box fontSize="body-s" color="text-body-secondary">
+                    Report assistant
+                  </Box>
+                  {streaming ? (
+                    <Markdown text={streaming} />
+                  ) : (
+                    <StatusIndicator type="loading">Thinking…</StatusIndicator>
+                  )}
+                </div>
+              </div>
+            )}
           </SpaceBetween>
         )}
 

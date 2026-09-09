@@ -1,0 +1,284 @@
+/**
+ * Streaming report chat (Function URL handler) — behavioral tests over
+ * runChatStream with a fake sink, fake JWT verifier, fake harness stream, and
+ * mocked DynamoDB/S3. Also covers ProposalGate, the edit-fence hold-back.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  ddbSend: vi.fn(),
+  s3Send: vi.fn(),
+  loadAgentConfig: vi.fn(),
+}));
+
+vi.mock('../handlers-src/lib/common', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../handlers-src/lib/common')>();
+  return { ...actual, ddb: { send: mocks.ddbSend } };
+});
+vi.mock('@aws-sdk/client-s3', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@aws-sdk/client-s3')>();
+  return {
+    ...actual,
+    S3Client: class {
+      send = mocks.s3Send;
+    },
+  };
+});
+vi.mock(
+  '@agentic-platform/constructs/dist/handlers-src/lib/runtime-config',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@agentic-platform/constructs/dist/handlers-src/lib/runtime-config')
+      >();
+    return { ...actual, loadAgentConfig: mocks.loadAgentConfig };
+  },
+);
+import {
+  runChatStream,
+  type ChatStreamSink,
+  type FunctionUrlEvent,
+  type JwtVerifier,
+} from '../handlers-src/chat-stream';
+import { ProposalGate } from '../handlers-src/lib/report-chat';
+
+const RUN_ID = 'run-1234';
+const REPORT_KEY = `artifacts/wf-1/${RUN_ID}/report.md`;
+const REPORT = '# Brief\n\n## Executive summary\n\nRevenue grew 12%.\n\n## Sources\n\n- a';
+const ARN = 'arn:aws:bedrock-agentcore:us-west-2:1:harness/report_chat';
+
+class FakeSink implements ChatStreamSink {
+  status?: number;
+  headers?: Record<string, string>;
+  chunks: string[] = [];
+  ended = false;
+  start(status: number, headers: Record<string, string>) {
+    if (this.status !== undefined) throw new Error('start called twice');
+    this.status = status;
+    this.headers = headers;
+  }
+  write(chunk: string) {
+    this.chunks.push(chunk);
+  }
+  end() {
+    this.ended = true;
+  }
+  /** Parsed SSE data payloads. */
+  events(): Array<Record<string, unknown>> {
+    return this.chunks
+      .join('')
+      .split('\n\n')
+      .filter((e) => e.startsWith('data: '))
+      .map((e) => JSON.parse(e.slice(6)) as Record<string, unknown>);
+  }
+  body(): string {
+    return this.chunks.join('');
+  }
+}
+
+const okVerifier: JwtVerifier = { verify: async () => ({ 'cognito:username': 'alice' }) };
+const badVerifier: JwtVerifier = {
+  verify: async () => {
+    throw new Error('Token expired');
+  },
+};
+
+function event(body: unknown, overrides: Partial<FunctionUrlEvent> = {}): FunctionUrlEvent {
+  return {
+    rawPath: `/runs/${RUN_ID}/chat`,
+    requestContext: { http: { method: 'POST' } },
+    headers: { authorization: 'Bearer t0ken' },
+    body: JSON.stringify(body),
+    ...overrides,
+  };
+}
+const question = { messages: [{ role: 'user', content: 'Summarize' }] };
+
+function routeDdb(run: unknown, tasks: unknown[] = []) {
+  mocks.ddbSend.mockImplementation(async (command: { constructor: { name: string } }) =>
+    command.constructor.name === 'QueryCommand' ? { Items: tasks } : run,
+  );
+}
+const runItem = (overrides: Record<string, unknown> = {}) => ({
+  Item: { runId: RUN_ID, workflowId: 'wf-1', reportArtifactKey: REPORT_KEY, plan: { tasks: [] }, ...overrides },
+});
+
+async function* deltas(...parts: string[]) {
+  for (const part of parts) {
+    yield part;
+  }
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  process.env.TABLE_NAME = 'table';
+  process.env.BUCKET_NAME = 'bucket';
+  process.env.REPORT_CHAT_HARNESS_ARN = ARN;
+  mocks.loadAgentConfig.mockResolvedValue(undefined);
+  mocks.s3Send.mockResolvedValue({ Body: { transformToString: async () => REPORT } });
+});
+
+describe('runChatStream — auth and pre-stream failures (plain JSON)', () => {
+  it('401s without a bearer token before any AWS call', async () => {
+    const sink = new FakeSink();
+    const invoke = vi.fn();
+    await runChatStream(event(question, { headers: {} }), sink, { verifier: okVerifier, invoke });
+    expect(sink.status).toBe(401);
+    expect(sink.headers?.['content-type']).toBe('application/json');
+    expect(JSON.parse(sink.body())).toEqual({ error: 'missing bearer token' });
+    expect(mocks.ddbSend).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(sink.ended).toBe(true);
+  });
+
+  it('401s on a rejected token before any AWS call', async () => {
+    const sink = new FakeSink();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await runChatStream(event(question), sink, { verifier: badVerifier, invoke: vi.fn() });
+    expect(sink.status).toBe(401);
+    expect(JSON.parse(sink.body()).error).toMatch(/invalid or expired/);
+    expect(mocks.ddbSend).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('answers CORS preflight with 204 and no auth', async () => {
+    const sink = new FakeSink();
+    await runChatStream(
+      event(undefined, { requestContext: { http: { method: 'OPTIONS' } }, headers: {} }),
+      sink,
+      { verifier: badVerifier, invoke: vi.fn(), corsOrigin: 'https://app.example' },
+    );
+    expect(sink.status).toBe(204);
+    expect(sink.headers?.['access-control-allow-origin']).toBe('https://app.example');
+    expect(sink.body()).toBe('');
+  });
+
+  it('400/404/409/503 mirror the API route semantics', async () => {
+    // 400 malformed body
+    let sink = new FakeSink();
+    await runChatStream(event({ messages: [] }), sink, { verifier: okVerifier, invoke: vi.fn() });
+    expect(sink.status).toBe(400);
+    // 404 bad path
+    sink = new FakeSink();
+    await runChatStream(event(question, { rawPath: '/nope' }), sink, { verifier: okVerifier, invoke: vi.fn() });
+    expect(sink.status).toBe(404);
+    // 503 no harness configured
+    delete process.env.REPORT_CHAT_HARNESS_ARN;
+    sink = new FakeSink();
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke: vi.fn() });
+    expect(sink.status).toBe(503);
+    process.env.REPORT_CHAT_HARNESS_ARN = ARN;
+    // 404 unknown run
+    routeDdb({ Item: undefined });
+    sink = new FakeSink();
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke: vi.fn() });
+    expect(sink.status).toBe(404);
+    // 409 no report yet
+    routeDdb(runItem({ reportArtifactKey: undefined }));
+    sink = new FakeSink();
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke: vi.fn() });
+    expect(sink.status).toBe(409);
+  });
+});
+
+describe('runChatStream — event stream', () => {
+  it('streams deltas then a done event with the parsed reply', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    const invoke = vi.fn().mockReturnValue(deltas('Revenue ', 'grew ', '12%.'));
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke });
+
+    expect(sink.status).toBe(200);
+    expect(sink.headers?.['content-type']).toBe('text/event-stream');
+    const events = sink.events();
+    const text = events.filter((e) => e.type === 'delta').map((e) => e.text).join('');
+    expect(text).toBe('Revenue grew 12%.');
+    const done = events.find((e) => e.type === 'done')!;
+    expect(done).toMatchObject({
+      message: { role: 'assistant', content: 'Revenue grew 12%.' },
+      reportVersion: 1,
+    });
+    expect(sink.ended).toBe(true);
+    // Invoked the chat harness with the grounded request.
+    const args = invoke.mock.calls[0]![0] as { harnessArn: string; text: string };
+    expect(args.harnessArn).toBe(ARN);
+    expect(args.text).toContain('# Report (version 1)');
+  });
+
+  it('never streams the edit-proposal fence; the proposal arrives in done', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    const proposal = JSON.stringify({
+      heading: '## Executive summary',
+      newMarkdown: '## Executive summary\n\nUp 12% YoY.',
+      rationale: 'basis',
+    });
+    // Fence opener split across deltas on purpose.
+    const invoke = vi.fn().mockReturnValue(
+      deltas('Tightened it.\n\n``', '`edit-prop', 'osal\n', proposal, '\n```'),
+    );
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke });
+
+    const events = sink.events();
+    const text = events.filter((e) => e.type === 'delta').map((e) => e.text).join('');
+    expect(text).not.toContain('edit-proposal');
+    expect(text).not.toContain('{');
+    expect(text.trim()).toBe('Tightened it.');
+    const done = events.find((e) => e.type === 'done')!;
+    expect((done.message as Record<string, unknown>).content).toBe('Tightened it.');
+    expect((done.message as Record<string, unknown>).proposedEdit).toEqual({
+      heading: '## Executive summary',
+      newMarkdown: '## Executive summary\n\nUp 12% YoY.',
+      rationale: 'basis',
+    });
+  });
+
+  it('emits an error event (not a 5xx) when the harness fails mid-stream', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // eslint-disable-next-line require-yield
+    async function* failing() {
+      // Long enough to clear the gate's fence hold-back window.
+      yield 'Here is a partial answer that was cut off mid-';
+      throw new Error('throttled');
+    }
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke: vi.fn().mockReturnValue(failing()) });
+    expect(sink.status).toBe(200); // headers already sent
+    const events = sink.events();
+    expect(events.some((e) => e.type === 'delta')).toBe(true);
+    expect(events.find((e) => e.type === 'error')).toMatchObject({ status: 502 });
+    expect(events.find((e) => e.type === 'done')).toBeUndefined();
+    expect(sink.ended).toBe(true);
+    consoleError.mockRestore();
+  });
+});
+
+describe('ProposalGate', () => {
+  function run(parts: string[]) {
+    const gate = new ProposalGate();
+    let visible = '';
+    for (const part of parts) visible += gate.push(part);
+    visible += gate.flush();
+    return { visible, collected: gate.collected };
+  }
+
+  it('passes plain text through completely', () => {
+    const { visible, collected } = run(['Hello ', 'world', '.']);
+    expect(visible).toBe('Hello world.');
+    expect(collected).toBe('Hello world.');
+  });
+  it('keeps ordinary code fences visible', () => {
+    const { visible } = run(['See:\n```js\n', 'x()\n```\ndone']);
+    expect(visible).toBe('See:\n```js\nx()\n```\ndone');
+  });
+  it('withholds everything from the proposal fence onward, even when split', () => {
+    const { visible, collected } = run(['Answer.\n\n``', '`edit-proposal\n{"a":1}\n```']);
+    expect(visible).toBe('Answer.\n\n');
+    expect(collected).toBe('Answer.\n\n```edit-proposal\n{"a":1}\n```');
+  });
+  it('withholds when the fence arrives in a single delta', () => {
+    const { visible } = run(['Answer.\n```edit-proposal\n{}\n```']);
+    expect(visible).toBe('Answer.\n');
+  });
+});

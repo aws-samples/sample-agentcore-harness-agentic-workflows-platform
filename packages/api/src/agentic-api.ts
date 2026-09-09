@@ -75,6 +75,14 @@ export class AgenticApi extends Construct {
   public readonly userPoolClient: cognito.UserPoolClient;
   public readonly routerFunction: lambda.Function;
   public readonly plannerJobFunction: lambda.Function;
+  /** Streaming report chat (present only when a report_chat agent exists). */
+  public readonly chatStreamFunction?: lambda.Function;
+  /**
+   * Response-streaming Function URL for POST /runs/{runId}/chat. The web app
+   * prefers it over the buffered router route (D-30). Undefined without a
+   * report_chat agent.
+   */
+  public readonly chatStreamUrl?: string;
 
   constructor(scope: Construct, id: string, props: AgenticApiProps) {
     super(scope, id);
@@ -205,6 +213,56 @@ export class AgenticApi extends Construct {
         resources: ['*'],
       }),
     );
+
+    // ── Streaming chat (D-30) ───────────────────────────────────────────
+    // API Gateway HTTP API buffers Lambda responses and caps integrations at
+    // 29s; a section-edit proposal regularly needs 20–30s (live 500). A
+    // Lambda Function URL with RESPONSE_STREAM lifts the cap and streams
+    // tokens. Function URLs only offer AWS_IAM or NONE auth and the SPA has
+    // Cognito id tokens, so the URL is NONE and the handler verifies the JWT
+    // itself (aws-jwt-verify against this pool + client) before any AWS
+    // call — a deliberate second trust boundary, documented in decisions.md.
+    if (reportChat) {
+      const corsOrigins = props.corsOrigins ?? ['*'];
+      this.chatStreamFunction = new lambda.Function(this, 'ChatStreamFn', {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromAsset(path.join(handlersRoot(), 'chat-stream')),
+        // Grounded answers + section rewrites; well under the 15m URL cap.
+        timeout: Duration.minutes(5),
+        memorySize: 512,
+        environment: {
+          TABLE_NAME: foundation.table.tableName,
+          BUCKET_NAME: foundation.artifactsBucket.bucketName,
+          REPORT_CHAT_HARNESS_ARN: reportChat.harnessArn,
+          USER_POOL_ID: this.userPool.userPoolId,
+          USER_POOL_CLIENT_ID: this.userPoolClient.userPoolClientId,
+          // Single-origin deployments echo it; '*' otherwise (URL-level CORS
+          // below is the authoritative allowlist).
+          CORS_ORIGIN: corsOrigins.length === 1 ? corsOrigins[0]! : '*',
+        },
+        description: 'Agentic API: streaming report chat (Function URL, SSE)',
+        tracing: lambda.Tracing.ACTIVE,
+        logRetention: logs.RetentionDays.THREE_MONTHS,
+      });
+      // Read-only surface: run/task/config records, report + task artifacts,
+      // and invoke on the ONE chat harness. No writes — saves go via router.
+      foundation.table.grantReadData(this.chatStreamFunction);
+      foundation.artifactsBucket.grantRead(this.chatStreamFunction);
+      reportChat.grantInvoke(this.chatStreamFunction);
+      const url = this.chatStreamFunction.addFunctionUrl({
+        authType: lambda.FunctionUrlAuthType.NONE,
+        invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
+        cors: {
+          allowedOrigins: corsOrigins,
+          allowedMethods: [lambda.HttpMethod.POST],
+          allowedHeaders: ['authorization', 'content-type'],
+          maxAge: Duration.hours(1),
+        },
+      });
+      this.chatStreamUrl = url.url;
+      new CfnOutput(this, 'ChatStreamUrl', { value: url.url });
+    }
 
     // ── HTTP API ────────────────────────────────────────────────
     const issuer = `https://cognito-idp.${Stack.of(this).region}.amazonaws.com/${this.userPool.userPoolId}`;

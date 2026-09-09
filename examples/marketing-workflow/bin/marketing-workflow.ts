@@ -25,6 +25,10 @@ const fastModelId =
 const deepModelId =
   (app.node.tryGetContext('deepModelId') as string | undefined) ??
   process.env.MARKETING_DEEP_MODEL_ID;
+const chatModelId =
+  (app.node.tryGetContext('chatModelId') as string | undefined) ??
+  process.env.MARKETING_CHAT_MODEL_ID ??
+  fastModelId;
 const modelCatalog =
   fastModelId || deepModelId
     ? [
@@ -78,9 +82,9 @@ new MarketingWorkflowStack(app, 'MarketingWorkflow', {
   // Plan quality drives every downstream task: run the planner on the
   // deep-tier model whenever one is provided.
   ...(deepModelId ? { plannerModelId: deepModelId } : {}),
-  // Report chat is a light grounded-answer task: run it on the fast tier
-  // whenever one is provided.
-  ...(fastModelId ? { chatModelId: fastModelId } : {}),
+  // Report chat is a light grounded-answer task: `-c chatModelId=…` pins it
+  // explicitly; otherwise it follows the fast tier when one is provided.
+  ...(chatModelId ? { chatModelId } : {}),
   // Optional: -c alarmEmail=<address> subscribes to the workload alarms.
   ...((app.node.tryGetContext('alarmEmail') as string | undefined)
     ? { alarmEmail: app.node.tryGetContext('alarmEmail') as string }

@@ -31,7 +31,6 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { randomUUID } from 'node:crypto';
 import {
   LIST_INDEX_NAME,
-  REPORT_TASK_ID,
   artifactKeys,
   parsePlanDocument,
   tableKeys,
@@ -39,18 +38,15 @@ import {
   type ReportVersion,
 } from '@agentic-platform/plan-schema';
 import {
-  loadAgentConfig,
   loadDeployedWorkerCatalog,
   loadEffectiveModelCatalog,
-  resolveModelInvocation,
 } from '@agentic-platform/constructs/dist/handlers-src/lib/runtime-config';
 import { invokeHarnessText } from '@agentic-platform/constructs/dist/handlers-src/lib/planner-client';
 import {
-  CHAT_SOURCE_MAX_CHARS,
-  REPORT_CHAT_AGENT_NAME,
-  buildChatRequest,
-  parseChatAnswer,
-  type GroundingSource,
+  chatInvocationArgs,
+  finalChatPayload,
+  loadChatContext,
+  reportVersionsOf,
 } from './lib/report-chat';
 import { ddb, nowIso, requireEnv } from './lib/common';
 import { checkModelIds } from './lib/model-catalog-check';
@@ -947,96 +943,19 @@ async function chatAboutReport(
         'report chat is not enabled for this deployment — add an agent named "report_chat" to the workload',
     });
   }
-  const tableName = requireEnv('TABLE_NAME');
-  const bucketName = requireEnv('BUCKET_NAME');
-  const run = await ddb.send(
-    new GetCommand({ TableName: tableName, Key: tableKeys.run(runId) }),
-  );
-  if (!run.Item) {
-    return notFound(`run ${runId}`);
+  const loaded = await loadChatContext({
+    tableName: requireEnv('TABLE_NAME'),
+    bucketName: requireEnv('BUCKET_NAME'),
+    runId,
+  });
+  if (!loaded.ok) {
+    return json(loaded.status, { error: loaded.error });
   }
-  const reportKey =
-    typeof run.Item.reportArtifactKey === 'string'
-      ? run.Item.reportArtifactKey
-      : undefined;
-  if (!reportKey) {
-    return json(409, {
-      error:
-        'this run has no report yet — a report is available once the run finishes (succeeded or partial)',
-    });
-  }
-  const versions = reportVersionsOf(run.Item);
-  const currentVersion = versions[versions.length - 1]!.version;
-
-  // Grounding: the current report plus every succeeded task's output.
-  let reportMarkdown: string;
-  const sources: GroundingSource[] = [];
   try {
-    reportMarkdown = await readArtifact(bucketName, reportKey);
-    const tasks = await ddb.send(
-      new QueryCommand({
-        TableName: tableName,
-        KeyConditionExpression: 'pk = :pk AND begins_with(sk, :sk)',
-        ExpressionAttributeValues: { ':pk': `RUN#${runId}`, ':sk': 'TASK#' },
-      }),
+    const raw = await invokeHarnessText(
+      chatInvocationArgs(harnessArn, loaded.context, validated.value.messages),
     );
-    const plan = run.Item.plan as
-      | { tasks?: Array<{ id: string; name?: string }> }
-      | undefined;
-    const names = new Map(
-      (plan?.tasks ?? []).map((task) => [task.id, task.name ?? task.id]),
-    );
-    for (const task of tasks.Items ?? []) {
-      const taskId = String(task.taskId ?? '');
-      if (
-        taskId === REPORT_TASK_ID ||
-        task.status !== 'succeeded' ||
-        typeof task.artifactKey !== 'string'
-      ) {
-        continue;
-      }
-      sources.push({
-        taskId,
-        name: names.get(taskId) ?? taskId,
-        text: await readArtifact(bucketName, task.artifactKey, CHAT_SOURCE_MAX_CHARS),
-      });
-    }
-  } catch (error) {
-    console.error('chatAboutReport: grounding fetch failed', { runId, error });
-    return json(502, { error: 'could not load the report artifacts for this run' });
-  }
-
-  // Same override resolution as the interpreter applies to workers (D-19).
-  const agentConfig = await loadAgentConfig(tableName, REPORT_CHAT_AGENT_NAME);
-  const model = resolveModelInvocation(agentConfig);
-
-  try {
-    const raw = await invokeHarnessText({
-      harnessArn,
-      // Runtime session ids must be ≥33 chars; one session per run keeps
-      // every question about that run in the same harness conversation.
-      sessionId: `chat-${runId}-report-session`.padEnd(33, '0'),
-      text: buildChatRequest({
-        reportMarkdown,
-        reportVersion: currentVersion,
-        sources,
-        messages: validated.value.messages,
-      }),
-      ...(agentConfig?.instructionsOverride
-        ? { systemPrompt: agentConfig.instructionsOverride }
-        : {}),
-      ...(model ? { model } : {}),
-    });
-    const parsed = parseChatAnswer(raw, reportMarkdown);
-    return json(200, {
-      message: {
-        role: 'assistant',
-        content: parsed.content,
-        ...(parsed.proposedEdit ? { proposedEdit: parsed.proposedEdit } : {}),
-        ...(parsed.proposalIssue ? { proposalIssue: parsed.proposalIssue } : {}),
-      },
-      reportVersion: currentVersion,
-    });
+    return json(200, finalChatPayload(raw, loaded.context));
   } catch (error) {
     console.error('chatAboutReport: harness invocation failed', { runId, error });
     return json(502, {
@@ -1135,34 +1054,6 @@ async function putReport(runId: string, event: HttpEvent): Promise<HttpResponse>
     reportArtifactKey: artifactKey,
     reportVersions: [...versions, entry],
   });
-}
-
-/**
- * A run's report version list. Runs created before editing existed have no
- * list; synthesize v1 from reportArtifactKey so callers always see ≥1 entry.
- */
-function reportVersionsOf(run: Record<string, unknown>): ReportVersion[] {
-  const stored = run.reportVersions;
-  if (Array.isArray(stored) && stored.length > 0) {
-    return stored as ReportVersion[];
-  }
-  return [
-    {
-      version: 1,
-      artifactKey: String(run.reportArtifactKey ?? ''),
-      savedAt: String(run.finishedAt ?? run.startedAt ?? ''),
-    },
-  ];
-}
-
-async function readArtifact(
-  bucket: string,
-  key: string,
-  maxChars?: number,
-): Promise<string> {
-  const object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-  const body = (await object.Body?.transformToString()) ?? '';
-  return maxChars === undefined ? body : body.slice(0, maxChars);
 }
 
 function publicWorkflow(item: Record<string, unknown>): Record<string, unknown> {

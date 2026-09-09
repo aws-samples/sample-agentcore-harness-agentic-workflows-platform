@@ -163,8 +163,7 @@ export function buildPlannerUserMessage(
   ].join('\n\n');
 }
 
-/** Invoke a harness and collect the streamed text content. */
-export async function invokeHarnessText(args: {
+export interface InvokeHarnessArgs {
   harnessArn: string;
   sessionId: string;
   text: string;
@@ -172,7 +171,17 @@ export async function invokeHarnessText(args: {
   systemPrompt?: string;
   /** Per-invocation model override (admin model and/or extended thinking). */
   model?: ResolvedModelInvocation;
-}): Promise<string> {
+}
+
+/**
+ * Invoke a harness and yield text deltas as the model produces them. This
+ * is the primitive behind both the buffered `invokeHarnessText` and the
+ * API's streaming chat route (SSE over a Lambda response stream), so the
+ * request shape and error handling live in exactly one place.
+ */
+export async function* invokeHarnessStream(
+  args: InvokeHarnessArgs,
+): AsyncGenerator<string, void, undefined> {
   const response = await client.send(
     new InvokeHarnessCommand({
       harnessArn: args.harnessArn,
@@ -186,18 +195,25 @@ export async function invokeHarnessText(args: {
         : {}),
     }),
   );
-  let collected = '';
   for await (const event of response.stream ?? []) {
     if ('contentBlockDelta' in event) {
       const delta = (event.contentBlockDelta as { delta?: { text?: string } })
         ?.delta;
       if (delta?.text) {
-        collected += delta.text;
+        yield delta.text;
       }
     } else if ('runtimeClientError' in event) {
       const error = event.runtimeClientError as { message?: string };
       throw new Error(`Harness runtime error: ${error?.message ?? 'unknown'}`);
     }
+  }
+}
+
+/** Invoke a harness and collect the streamed text content. */
+export async function invokeHarnessText(args: InvokeHarnessArgs): Promise<string> {
+  let collected = '';
+  for await (const delta of invokeHarnessStream(args)) {
+    collected += delta;
   }
   return collected;
 }

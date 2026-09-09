@@ -309,6 +309,9 @@ export class MarketingWorkflowStack extends Stack {
           apiUrl: api.httpApi.apiEndpoint,
           region: this.region,
           userPoolClientId: api.userPoolClient.userPoolClientId,
+          // Streaming chat endpoint (D-30); the SPA falls back to the
+          // buffered API route when absent.
+          ...(api.chatStreamUrl ? { chatStreamUrl: api.chatStreamUrl } : {}),
         }),
       ],
     });

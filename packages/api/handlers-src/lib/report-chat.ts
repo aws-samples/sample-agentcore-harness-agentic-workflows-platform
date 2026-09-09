@@ -14,7 +14,22 @@
  * splices cleanly — a proposal the UI could not apply is dropped with a
  * note rather than shown as a broken "Apply" button.
  */
-import { replaceReportSection } from '@agentic-platform/plan-schema';
+import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  REPORT_TASK_ID,
+  replaceReportSection,
+  tableKeys,
+  type ReportVersion,
+} from '@agentic-platform/plan-schema';
+import {
+  loadAgentConfig,
+  resolveModelInvocation,
+  type ResolvedModelInvocation,
+} from '@agentic-platform/constructs/dist/handlers-src/lib/runtime-config';
+import { ddb } from './common';
+
+const s3 = new S3Client({});
 
 /**
  * Reserved agent name (mirrors REPORT_CHAT_AGENT_NAME in the constructs
@@ -146,4 +161,231 @@ export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnsw
     content,
     proposedEdit: { heading, newMarkdown, ...(rationale ? { rationale } : {}) },
   };
+}
+
+// ── Shared grounding core (router sync route + streaming Function URL) ─────
+
+/**
+ * A run's report version list. Runs created before editing existed have no
+ * list; synthesize v1 from reportArtifactKey so callers always see ≥1 entry.
+ */
+export function reportVersionsOf(run: Record<string, unknown>): ReportVersion[] {
+  const stored = run.reportVersions;
+  if (Array.isArray(stored) && stored.length > 0) {
+    return stored as ReportVersion[];
+  }
+  return [
+    {
+      version: 1,
+      artifactKey: String(run.reportArtifactKey ?? ''),
+      savedAt: String(run.finishedAt ?? run.startedAt ?? ''),
+    },
+  ];
+}
+
+export async function readArtifact(
+  bucket: string,
+  key: string,
+  maxChars?: number,
+): Promise<string> {
+  const object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const body = (await object.Body?.transformToString()) ?? '';
+  return maxChars === undefined ? body : body.slice(0, maxChars);
+}
+
+export interface ChatContext {
+  runId: string;
+  reportMarkdown: string;
+  reportVersion: number;
+  sources: GroundingSource[];
+  /** Per-invocation overrides from the agent's runtime config (D-19). */
+  systemPrompt?: string;
+  model?: ResolvedModelInvocation;
+}
+
+export type ChatContextResult =
+  | { ok: true; context: ChatContext }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Everything both chat handlers need before invoking the harness: the run
+ * (404), its report (409 until one exists), the current version's markdown
+ * plus every succeeded task's output (502 on artifact read failure), and the
+ * report_chat agent's admin overrides.
+ */
+export async function loadChatContext(args: {
+  tableName: string;
+  bucketName: string;
+  runId: string;
+}): Promise<ChatContextResult> {
+  const { tableName, bucketName, runId } = args;
+  const run = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.run(runId) }),
+  );
+  if (!run.Item) {
+    return { ok: false, status: 404, error: `run ${runId}` };
+  }
+  const reportKey =
+    typeof run.Item.reportArtifactKey === 'string'
+      ? run.Item.reportArtifactKey
+      : undefined;
+  if (!reportKey) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        'this run has no report yet — a report is available once the run finishes (succeeded or partial)',
+    };
+  }
+  const versions = reportVersionsOf(run.Item);
+  const reportVersion = versions[versions.length - 1]!.version;
+
+  let reportMarkdown: string;
+  const sources: GroundingSource[] = [];
+  try {
+    reportMarkdown = await readArtifact(bucketName, reportKey);
+    const tasks = await ddb.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: 'pk = :pk AND begins_with(sk, :sk)',
+        ExpressionAttributeValues: { ':pk': `RUN#${runId}`, ':sk': 'TASK#' },
+      }),
+    );
+    const plan = run.Item.plan as
+      | { tasks?: Array<{ id: string; name?: string }> }
+      | undefined;
+    const names = new Map(
+      (plan?.tasks ?? []).map((task) => [task.id, task.name ?? task.id]),
+    );
+    for (const task of tasks.Items ?? []) {
+      const taskId = String(task.taskId ?? '');
+      if (
+        taskId === REPORT_TASK_ID ||
+        task.status !== 'succeeded' ||
+        typeof task.artifactKey !== 'string'
+      ) {
+        continue;
+      }
+      sources.push({
+        taskId,
+        name: names.get(taskId) ?? taskId,
+        text: await readArtifact(bucketName, task.artifactKey, CHAT_SOURCE_MAX_CHARS),
+      });
+    }
+  } catch (error) {
+    console.error('report-chat: grounding fetch failed', { runId, error });
+    return {
+      ok: false,
+      status: 502,
+      error: 'could not load the report artifacts for this run',
+    };
+  }
+
+  const agentConfig = await loadAgentConfig(tableName, REPORT_CHAT_AGENT_NAME);
+  const model = resolveModelInvocation(agentConfig);
+  return {
+    ok: true,
+    context: {
+      runId,
+      reportMarkdown,
+      reportVersion,
+      sources,
+      ...(agentConfig?.instructionsOverride
+        ? { systemPrompt: agentConfig.instructionsOverride }
+        : {}),
+      ...(model ? { model } : {}),
+    },
+  };
+}
+
+/** The InvokeHarness arguments for a chat turn (shared by both handlers). */
+export function chatInvocationArgs(
+  harnessArn: string,
+  context: ChatContext,
+  messages: ChatTurn[],
+) {
+  return {
+    harnessArn,
+    // Runtime session ids must be ≥33 chars; one session per run keeps every
+    // question about that run in the same harness conversation.
+    sessionId: `chat-${context.runId}-report-session`.padEnd(33, '0'),
+    text: buildChatRequest({
+      reportMarkdown: context.reportMarkdown,
+      reportVersion: context.reportVersion,
+      sources: context.sources,
+      messages,
+    }),
+    ...(context.systemPrompt ? { systemPrompt: context.systemPrompt } : {}),
+    ...(context.model ? { model: context.model } : {}),
+  };
+}
+
+/** The final chat payload both handlers return once the answer is complete. */
+export function finalChatPayload(raw: string, context: ChatContext) {
+  const parsed = parseChatAnswer(raw, context.reportMarkdown);
+  return {
+    message: {
+      role: 'assistant' as const,
+      content: parsed.content,
+      ...(parsed.proposedEdit ? { proposedEdit: parsed.proposedEdit } : {}),
+      ...(parsed.proposalIssue ? { proposalIssue: parsed.proposalIssue } : {}),
+    },
+    reportVersion: context.reportVersion,
+  };
+}
+
+// ── Streaming: keep the edit-proposal block out of the visible stream ─────
+
+const FENCE_OPEN = '```edit-proposal';
+
+/**
+ * Feed model deltas in; get back only the text that is safe to show live.
+ * Once the proposal fence begins, everything after it is withheld (the
+ * client receives the parsed proposal in the final `done` event instead).
+ * A small tail is always held back so a fence split across deltas is never
+ * partially emitted. Call `flush()` at the end to release the held tail
+ * when no fence ever appeared.
+ */
+export class ProposalGate {
+  private pending = '';
+  private fenced = false;
+  /** Everything received so far (for final parsing). */
+  public collected = '';
+
+  push(delta: string): string {
+    this.collected += delta;
+    if (this.fenced) {
+      return '';
+    }
+    this.pending += delta;
+    const fenceAt = this.pending.indexOf(FENCE_OPEN);
+    if (fenceAt >= 0) {
+      this.fenced = true;
+      const visible = this.pending.slice(0, fenceAt);
+      this.pending = '';
+      return visible;
+    }
+    // Hold back enough to cover a fence opener split across deltas.
+    const safeLength = Math.max(0, this.pending.length - (FENCE_OPEN.length - 1));
+    // Never split inside a run of backticks — emit up to the last safe
+    // boundary that isn't the start of a possible fence.
+    let cut = safeLength;
+    const tail = this.pending.slice(0, cut);
+    const lastTick = tail.lastIndexOf('`');
+    if (lastTick >= 0 && lastTick >= cut - FENCE_OPEN.length) {
+      cut = lastTick;
+    }
+    const visible = this.pending.slice(0, cut);
+    this.pending = this.pending.slice(cut);
+    return visible;
+  }
+
+  flush(): string {
+    if (this.fenced) {
+      return '';
+    }
+    const visible = this.pending;
+    this.pending = '';
+    return visible;
+  }
 }

@@ -149,6 +149,8 @@ That one construct provisions the KMS key, DynamoDB table, artifact bucket, harn
 
 `POST /runs/{runId}/chat` grounds the `report_chat` harness on the run's current report plus every succeeded task's output (character-budgeted), applies the same admin prompt/model overrides as workers, and returns the answer. When the user asks for a change, the agent replies with one **section-scoped** proposal (an existing heading plus the full replacement for that section) that the API validates against the current report. The web app shows current vs proposed side by side; the workflow owner or an admin can apply it to the editor or save it directly. Saves go through `PUT /runs/{runId}/report`: the generated `report.md` is never overwritten — each save writes `report.v<n>.md`, appends to the run's `reportVersions`, moves `reportArtifactKey` to the newest, and rejects stale `baseVersion`s with a 409.
 
+Chat answers stream. The web app posts to a **Lambda Function URL** (`ChatStreamUrl` output, surfaced to the SPA as `chatStreamUrl` in `config.json`) that runs the same grounding code with response streaming and server-sent events, because API Gateway HTTP API buffers responses and caps integrations at 29s — too short for a section rewrite (D-30). The URL uses `NONE` auth and the handler verifies the Cognito id token itself before any AWS call; the function is read-only and can invoke only the `report_chat` harness. The buffered `POST /runs/{runId}/chat` route remains as the fallback when no stream URL is configured.
+
 `second-workload` deliberately uses inline TypeScript agent configs to show the typed alternative to `workload.yaml` — both surfaces validate against the same zod schema.
 
 ## Tests and smoke test

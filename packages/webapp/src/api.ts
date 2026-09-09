@@ -5,6 +5,7 @@
 import type { PlanDocument } from '@agentic-platform/plan-schema';
 import { currentToken, signOut } from './auth';
 import { loadConfig } from './config';
+import { readSseEvents } from './sse';
 
 export type FailurePolicy = 'contain' | 'fail-fast' | 'retry-run';
 
@@ -181,6 +182,101 @@ async function request<T>(
     );
   }
   return payload as T;
+}
+
+export interface ChatReply {
+  message: ChatMessage;
+  reportVersion: number;
+}
+
+type StreamEvent =
+  | { type: 'delta'; text: string }
+  | ({ type: 'done' } & ChatReply)
+  | { type: 'error'; status: number; error: string };
+
+/**
+ * Streaming report chat (D-30). Prefers the response-streaming Function URL
+ * when the deployment provides one, calling `onDelta` with visible text as
+ * it arrives and resolving with the final reply (which carries any edit
+ * proposal). Falls back to the buffered API route when no stream URL is
+ * configured or the stream fails before producing any text — so older
+ * deployments keep working and a transient stream failure still answers.
+ */
+export async function chatAboutReportStream(
+  runId: string,
+  messages: ChatMessage[],
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<ChatReply> {
+  const config = await loadConfig();
+  const wire = messages.map(({ role, content }) => ({ role, content }));
+  if (!config.chatStreamUrl) {
+    return api.chatAboutReport(runId, messages);
+  }
+  const token = currentToken();
+  if (!token) {
+    signOut();
+    window.location.assign('/login');
+    throw new ApiError(401, 'not signed in');
+  }
+  const base = config.chatStreamUrl.replace(/\/$/, '');
+  let response: Response;
+  try {
+    response = await fetch(`${base}/runs/${encodeURIComponent(runId)}/chat`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+      },
+      body: JSON.stringify({ messages: wire }),
+      signal,
+    });
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    // Network-level failure before any bytes: fall back to the API route.
+    return api.chatAboutReport(runId, messages);
+  }
+  if (response.status === 401) {
+    signOut();
+    window.location.assign('/login?expired=1');
+    throw new ApiError(401, 'session expired');
+  }
+  if (!response.ok) {
+    // The pre-stream failure path returns plain JSON with the same status
+    // semantics as the API route (400/404/409/503) — surface it directly.
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new ApiError(
+      response.status,
+      typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`,
+    );
+  }
+  if (!response.body) {
+    return api.chatAboutReport(runId, messages);
+  }
+  let sawDelta = false;
+  for await (const data of readSseEvents(response.body)) {
+    let event: StreamEvent;
+    try {
+      event = JSON.parse(data) as StreamEvent;
+    } catch {
+      continue;
+    }
+    if (event.type === 'delta') {
+      sawDelta = true;
+      onDelta(event.text);
+    } else if (event.type === 'done') {
+      const { type: _type, ...reply } = event;
+      return reply;
+    } else if (event.type === 'error') {
+      throw new ApiError(event.status, event.error);
+    }
+  }
+  // Stream ended without a `done` event.
+  if (!sawDelta) {
+    return api.chatAboutReport(runId, messages);
+  }
+  throw new ApiError(502, 'the answer stream ended unexpectedly — please try again');
 }
 
 export const api = {

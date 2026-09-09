@@ -108,6 +108,53 @@ describe('AgenticApi', () => {
     expect(JSON.stringify(router)).toContain('REPORT_CHAT_HARNESS_ARN');
   });
 
+  it('provisions a response-streaming Function URL for chat with a read-only, single-harness grant (D-30)', () => {
+    const { template, api } = synth();
+    expect(api.chatStreamUrl).toBeDefined();
+    template.resourceCountIs('AWS::Lambda::Url', 1);
+    template.hasResourceProperties('AWS::Lambda::Url', {
+      AuthType: 'NONE',
+      InvokeMode: 'RESPONSE_STREAM',
+      Cors: Match.objectLike({
+        AllowMethods: ['POST'],
+        AllowHeaders: ['authorization', 'content-type'],
+      }),
+    });
+    // The public-invoke permission Lambda needs for a NONE-auth URL.
+    template.hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunctionUrl',
+      Principal: '*',
+      FunctionUrlAuthType: 'NONE',
+    });
+    const functions = template.findResources('AWS::Lambda::Function');
+    const streamFn = Object.values(functions).find((fn) =>
+      JSON.stringify(fn).includes('streaming report chat'),
+    )!;
+    const env = (streamFn as { Properties: { Environment: { Variables: Record<string, unknown> } } })
+      .Properties.Environment.Variables;
+    // In-handler JWT verification needs the pool + client; no write targets.
+    expect(Object.keys(env).sort()).toEqual([
+      'BUCKET_NAME',
+      'CORS_ORIGIN',
+      'REPORT_CHAT_HARNESS_ARN',
+      'TABLE_NAME',
+      'USER_POOL_CLIENT_ID',
+      'USER_POOL_ID',
+    ]);
+    const policies = template.findResources('AWS::IAM::Policy');
+    const streamPolicy = JSON.stringify(
+      Object.values(policies).find((policy) => JSON.stringify(policy).includes('ChatStreamFn')),
+    );
+    expect(streamPolicy).toContain('bedrock-agentcore:InvokeHarness');
+    expect(streamPolicy).toContain('dynamodb:GetItem');
+    expect(streamPolicy).toContain('s3:GetObject');
+    // Read-only: no table writes, no bucket writes, no state machine.
+    expect(streamPolicy).not.toContain('dynamodb:PutItem');
+    expect(streamPolicy).not.toContain('dynamodb:UpdateItem');
+    expect(streamPolicy).not.toContain('s3:PutObject');
+    expect(streamPolicy).not.toContain('states:');
+  });
+
   it('synthesizes without report_chat (chat route disabled, no invoke grant)', () => {
     const app = new App();
     const stack = new Stack(app, 'NoChat');
@@ -130,6 +177,8 @@ describe('AgenticApi', () => {
       (fn) => JSON.stringify(fn).includes('workflow/schedule/run/artifact routes'),
     );
     expect(JSON.stringify(router)).not.toContain('REPORT_CHAT_HARNESS_ARN');
+    // No streaming endpoint either.
+    template.resourceCountIs('AWS::Lambda::Url', 0);
   });
 
   it('mounts additionalRoutes behind the same JWT authorizer (python-developers seam)', () => {
