@@ -176,6 +176,12 @@ describe('POST /runs/{runId}/chat', () => {
     expect(args.harnessArn).toBe(CHAT_ARN);
     expect(args.sessionId.length).toBeGreaterThanOrEqual(33);
     expect(args.sessionId).toContain(RUN_ID);
+    // One harness session PER TURN: a shared per-run session replays every
+    // prior turn's grounding into the model (live: 181k input tokens).
+    mocks.invokeHarnessText.mockResolvedValueOnce('again');
+    await handler(chatEvent({ messages: [{ role: 'user', content: 'again?' }] }));
+    const second = mocks.invokeHarnessText.mock.calls[1]![0] as { sessionId: string };
+    expect(second.sessionId).not.toBe(args.sessionId);
     expect(args.text).toContain('# Report (version 1)');
     expect(args.text).toContain('Revenue grew 12%.');
     expect(args.text).toContain('## Competitor scan (t1)');

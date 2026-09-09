@@ -14,6 +14,7 @@
  * splices cleanly — a proposal the UI could not apply is dropped with a
  * note rather than shown as a broken "Apply" button.
  */
+import { randomUUID } from 'node:crypto';
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
@@ -306,9 +307,16 @@ export function chatInvocationArgs(
 ) {
   return {
     harnessArn,
-    // Runtime session ids must be ≥33 chars; one session per run keeps every
-    // question about that run in the same harness conversation.
-    sessionId: `chat-${context.runId}-report-session`.padEnd(33, '0'),
+    // ONE SESSION PER TURN, deliberately. The request already carries all
+    // the context a turn needs (report, sources, the client-held
+    // transcript), so harness session memory adds nothing — and it is
+    // harmful: a shared per-run session replays every prior turn's full
+    // grounding payload into the model on each call. Live finding: after a
+    // handful of turns one run's session hit 181,868 input tokens (vs 6,953
+    // fresh), right at Haiku's context limit — the model returned an empty
+    // answer and latencies had climbed into the 20–30s band that caused the
+    // original 29s 500. Ids must be ≥33 chars.
+    sessionId: `chat-${context.runId}-${randomUUID()}`.padEnd(33, '0'),
     text: buildChatRequest({
       reportMarkdown: context.reportMarkdown,
       reportVersion: context.reportVersion,
