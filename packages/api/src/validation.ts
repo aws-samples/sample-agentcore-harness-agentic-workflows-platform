@@ -244,6 +244,66 @@ export function validatePutAgentConfig(
   return { ok: true, value };
 }
 
+/**
+ * Report chat: a conversation turn. `messages` is the prior conversation
+ * (oldest first) and the new user question is the final 'user' turn. The
+ * client sends the whole transcript each call — the endpoint is stateless.
+ */
+const CHAT_MESSAGE_MAX = 8_000;
+const CHAT_HISTORY_MAX = 20;
+
+export interface ChatMessageInput {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatReportInput {
+  messages: ChatMessageInput[];
+}
+
+/**
+ * Validate a report-chat request. Requires a non-empty `messages` array whose
+ * final turn is from the user; caps per-message length and history depth to
+ * keep the assembled prompt within the harness budget.
+ */
+export function validateChatReport(
+  body: unknown,
+): { ok: true; value: ChatReportInput } | { ok: false; error: string } {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const raw = input.messages;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: 'messages must be a non-empty array' };
+  }
+  if (raw.length > CHAT_HISTORY_MAX) {
+    return {
+      ok: false,
+      error: `messages may contain at most ${CHAT_HISTORY_MAX} turns`,
+    };
+  }
+  const messages: ChatMessageInput[] = [];
+  for (const entry of raw as Array<Record<string, unknown>>) {
+    const role = entry?.role;
+    if (role !== 'user' && role !== 'assistant') {
+      return { ok: false, error: 'each message role must be "user" or "assistant"' };
+    }
+    const content = typeof entry?.content === 'string' ? entry.content.trim() : '';
+    if (!content) {
+      return { ok: false, error: 'each message needs non-empty content' };
+    }
+    if (content.length > CHAT_MESSAGE_MAX) {
+      return {
+        ok: false,
+        error: `message content exceeds ${CHAT_MESSAGE_MAX} chars`,
+      };
+    }
+    messages.push({ role, content });
+  }
+  if (messages[messages.length - 1]!.role !== 'user') {
+    return { ok: false, error: 'the final message must be from the user' };
+  }
+  return { ok: true, value: { messages } };
+}
+
 const MODEL_CATALOG_MAX = 16;
 const MODEL_ID_MAX = 128;
 const MODEL_DESCRIPTION_MAX = 512;

@@ -165,6 +165,23 @@ export class AgenticApi extends Construct {
     foundation.table.grantReadWriteData(this.routerFunction);
     foundation.artifactsBucket.grantRead(this.routerFunction);
     foundation.workflow.grantStartExecution(this.routerFunction);
+    // Report chat (POST /runs/{runId}/chat): the router synchronously invokes
+    // the run's report worker harness to answer questions grounded in the
+    // report. Grant InvokeHarness/InvokeAgentRuntime on every registered
+    // worker harness (and its endpoints) — the report worker varies per plan,
+    // and this mirrors the interpreter's own worker-invoke grant (D-12).
+    const workerHarnessArns = Object.values(foundation.workflow.workerArns);
+    if (workerHarnessArns.length > 0) {
+      this.routerFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            'bedrock-agentcore:InvokeHarness',
+            'bedrock-agentcore:InvokeAgentRuntime',
+          ],
+          resources: workerHarnessArns.flatMap((arn) => [arn, `${arn}/*`]),
+        }),
+      );
+    }
     // Zombie-run reconciliation (D-15): read-only on this SM's executions.
     foundation.workflow.stateMachine.grantExecution(
       this.routerFunction,

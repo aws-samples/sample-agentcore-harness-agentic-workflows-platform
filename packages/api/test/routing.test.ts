@@ -4,6 +4,7 @@ import {
   artifactKeyBelongsToRun,
   isValidScheduleExpression,
   unknownWorkers,
+  validateChatReport,
   validateCreateWorkflow,
   validatePutAgentConfig,
   validatePutOrgSettings,
@@ -27,6 +28,13 @@ describe('matchRoute', () => {
       key: 'getArtifactUrl',
       params: { runId: 'abc' },
     });
+  });
+  it('matches the report-chat route (POST only)', () => {
+    expect(matchRoute('POST', '/runs/run-1/chat')).toEqual({
+      key: 'chatAboutReport',
+      params: { runId: 'run-1' },
+    });
+    expect(matchRoute('GET', '/runs/run-1/chat')).toBeNull();
   });
   it('matches the delete-workflow route', () => {
     expect(matchRoute('DELETE', '/workflows/wf-1')).toEqual({
@@ -262,6 +270,76 @@ describe('validatePutOrgSettings', () => {
         modelCatalog: Array.from({ length: 17 }, (_, i) => ({ modelId: `m${i}` })),
       }).ok,
     ).toBe(false);
+  });
+});
+
+describe('validateChatReport', () => {
+  it('accepts a single user question and trims content', () => {
+    expect(
+      validateChatReport({ messages: [{ role: 'user', content: '  What changed?  ' }] }),
+    ).toEqual({
+      ok: true,
+      value: { messages: [{ role: 'user', content: 'What changed?' }] },
+    });
+  });
+  it('accepts a multi-turn transcript ending with the user', () => {
+    const result = validateChatReport({
+      messages: [
+        { role: 'user', content: 'Summarize' },
+        { role: 'assistant', content: 'Here is a summary.' },
+        { role: 'user', content: 'And the gaps?' },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.messages).toHaveLength(3);
+    }
+  });
+  it('rejects empty, missing, or non-array messages', () => {
+    expect(validateChatReport({}).ok).toBe(false);
+    expect(validateChatReport({ messages: [] }).ok).toBe(false);
+    expect(validateChatReport({ messages: 'hi' }).ok).toBe(false);
+    expect(validateChatReport(null).ok).toBe(false);
+  });
+  it('rejects a transcript whose final turn is the assistant', () => {
+    const result = validateChatReport({
+      messages: [
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: 'a' },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/final message must be from the user/);
+    }
+  });
+  it('rejects bad roles and empty content', () => {
+    expect(
+      validateChatReport({ messages: [{ role: 'system', content: 'x' }] }).ok,
+    ).toBe(false);
+    expect(
+      validateChatReport({ messages: [{ role: 'user', content: '   ' }] }).ok,
+    ).toBe(false);
+    expect(validateChatReport({ messages: [{ role: 'user' }] }).ok).toBe(false);
+  });
+  it('caps message length and history depth', () => {
+    expect(
+      validateChatReport({
+        messages: [{ role: 'user', content: 'x'.repeat(8_001) }],
+      }).ok,
+    ).toBe(false);
+    const tooMany = Array.from({ length: 21 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `t${i}`,
+    }));
+    expect(validateChatReport({ messages: tooMany }).ok).toBe(false);
+    // Exactly at the cap, ending on a user turn (index 19 is odd → assistant,
+    // so build 20 turns that end with user).
+    const atCap = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? 'assistant' : 'user',
+      content: `t${i}`,
+    }));
+    expect(validateChatReport({ messages: atCap }).ok).toBe(true);
   });
 });
 

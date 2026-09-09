@@ -14,11 +14,12 @@ import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import ProgressBar from '@cloudscape-design/components/progress-bar';
+import PromptInput from '@cloudscape-design/components/prompt-input';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
-import { api, type RunDetail, type TaskView } from '../api';
+import { api, ApiError, type ChatMessage, type RunDetail, type TaskView } from '../api';
 import Markdown from '../components/Markdown';
 import { RunStatus, TaskStatus } from '../components/status';
 import { durationBetween, formatCount, formatDateTime } from '../format';
@@ -332,7 +333,124 @@ export default function RunDetailPage() {
             )}
           </Container>
         )}
+
+        {reportKey && <ReportChat runId={runId} />}
       </SpaceBetween>
     </ContentLayout>
+  );
+}
+
+/**
+ * Ask-the-report chat: a report-grounded agent answers end-user questions
+ * about this run's deliverable. Stateless on the wire — the whole transcript
+ * is sent each turn; the backend reuses the run's report worker harness with
+ * the report markdown injected as its sole grounding source.
+ */
+function ReportChat({ runId }: { runId: string }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+
+  async function send() {
+    const question = draft.trim();
+    if (!question || busy) {
+      return;
+    }
+    const history: ChatMessage[] = [...messages, { role: 'user', content: question }];
+    setMessages(history);
+    setDraft('');
+    setChatError(null);
+    setBusy(true);
+    try {
+      const { message } = await api.chatAboutReport(runId, history);
+      setMessages((current) => [...current, message]);
+    } catch (e) {
+      // Keep the user's question in the transcript; surface a retryable error.
+      const notReady =
+        e instanceof ApiError && e.status === 409
+          ? 'The report for this run isn’t available yet.'
+          : null;
+      setChatError(notReady ?? (e instanceof Error ? e.message : 'chat failed'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Container
+      header={
+        <Header
+          variant="h2"
+          description="Ask questions about this run’s report. Answers are grounded only in the generated report."
+          actions={
+            messages.length > 0 ? (
+              <Button
+                iconName="remove"
+                disabled={busy}
+                onClick={() => {
+                  setMessages([]);
+                  setChatError(null);
+                }}
+              >
+                Clear
+              </Button>
+            ) : undefined
+          }
+        >
+          Ask the report
+        </Header>
+      }
+    >
+      <SpaceBetween size="m">
+        {messages.length === 0 ? (
+          <Box color="text-body-secondary">
+            Try “Summarize the key findings” or “What gaps were flagged?”
+          </Box>
+        ) : (
+          <SpaceBetween size="m">
+            {messages.map((message, index) => (
+              <div
+                key={index}
+                style={{ display: 'flex', justifyContent: message.role === 'user' ? 'flex-end' : 'flex-start' }}
+              >
+                <div style={{ maxWidth: '85%' }}>
+                  <Box
+                    fontSize="body-s"
+                    color="text-body-secondary"
+                    textAlign={message.role === 'user' ? 'right' : 'left'}
+                  >
+                    {message.role === 'user' ? 'You' : 'Report assistant'}
+                  </Box>
+                  {message.role === 'assistant' ? (
+                    <Markdown text={message.content} />
+                  ) : (
+                    <Box variant="p">{message.content}</Box>
+                  )}
+                </div>
+              </div>
+            ))}
+            {busy && <StatusIndicator type="loading">Thinking…</StatusIndicator>}
+          </SpaceBetween>
+        )}
+
+        {chatError && (
+          <Alert type="error" dismissible onDismiss={() => setChatError(null)}>
+            {chatError}
+          </Alert>
+        )}
+
+        <PromptInput
+          value={draft}
+          onChange={({ detail }) => setDraft(detail.value)}
+          onAction={() => void send()}
+          disabled={busy}
+          actionButtonAriaLabel="Send question"
+          actionButtonIconName="send"
+          placeholder="Ask a question about this report"
+          maxRows={6}
+        />
+      </SpaceBetween>
+    </Container>
   );
 }

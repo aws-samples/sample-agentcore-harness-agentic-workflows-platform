@@ -78,6 +78,28 @@ describe('AgenticApi', () => {
     );
   });
 
+  it('grants the router harness invoke on worker harnesses for report chat', () => {
+    const { template } = synth();
+    const policies = template.findResources('AWS::IAM::Policy');
+    const routerPolicy = Object.values(policies).find((policy) =>
+      JSON.stringify(policy).includes('RouterFn'),
+    );
+    const routerPolicyJson = JSON.stringify(routerPolicy);
+    expect(routerPolicyJson).toContain('bedrock-agentcore:InvokeHarness');
+    expect(routerPolicyJson).toContain('bedrock-agentcore:InvokeAgentRuntime');
+    // Scoped to the worker harnesses — the planner is not a worker and is
+    // invoked only via planner-job. Resolve logical ids by HarnessName so the
+    // assertion doesn't depend on construct-path naming.
+    const harnesses = template.findResources('AWS::BedrockAgentCore::Harness');
+    const logicalIdFor = (name: string) =>
+      Object.entries(harnesses).find(
+        ([, res]) => (res as { Properties: { HarnessName: string } }).Properties.HarnessName === name,
+      )![0];
+    expect(routerPolicyJson).toContain(logicalIdFor('report_generator'));
+    expect(routerPolicyJson).toContain(logicalIdFor('web_research'));
+    expect(routerPolicyJson).not.toContain(logicalIdFor('planner'));
+  });
+
   it('mounts additionalRoutes behind the same JWT authorizer (python-developers seam)', () => {
     const app = new App();
     const stack = new Stack(app, 'ExtraRoutes');

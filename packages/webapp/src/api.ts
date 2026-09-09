@@ -90,6 +90,12 @@ export interface TaskView {
   finishedAt?: string;
 }
 
+/** A single turn in a report-chat conversation. */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface PlanDraftJob {
   jobId: string;
   workflowId: string;
@@ -206,6 +212,15 @@ export const api = {
       'GET',
       `/runs/${runId}/artifact-url?key=${encodeURIComponent(key)}`,
     ),
+  /**
+   * Ask a question about a run's generated report. Stateless: send the whole
+   * conversation (oldest first); the final turn must be the user's question.
+   * Returns the assistant's answer, grounded in the report.
+   */
+  chatAboutReport: (runId: string, messages: ChatMessage[]) =>
+    request<{ message: ChatMessage }>('POST', `/runs/${runId}/chat`, {
+      messages,
+    }),
   // Runtime configuration (D-19): prompts + org settings.
   getSettings: () => request<SettingsResponse>('GET', '/settings'),
   putAgentConfig: (

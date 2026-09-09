@@ -39,6 +39,7 @@ import {
   loadDeployedWorkerCatalog,
   loadEffectiveModelCatalog,
 } from '@agentic-platform/constructs/dist/handlers-src/lib/runtime-config';
+import { invokeHarnessText } from '@agentic-platform/constructs/dist/handlers-src/lib/planner-client';
 import { ddb, nowIso, requireEnv } from './lib/common';
 import { checkModelIds } from './lib/model-catalog-check';
 import {
@@ -56,6 +57,7 @@ import { matchRoute } from '../src/routing';
 import {
   artifactKeyBelongsToRun,
   isValidScheduleExpression,
+  validateChatReport,
   validateCreateWorkflow,
   validatePutAgentConfig,
   validatePutOrgSettings,
@@ -103,6 +105,8 @@ export async function handler(event: HttpEvent): Promise<HttpResponse> {
         return await getRun(match.params.runId!);
       case 'getArtifactUrl':
         return await getArtifactUrl(match.params.runId!, event);
+      case 'chatAboutReport':
+        return await chatAboutReport(match.params.runId!, event);
       case 'getSettings':
         return await getSettings(event);
       case 'putAgentConfig':
@@ -897,6 +901,126 @@ async function getArtifactUrl(
     { expiresIn: PRESIGN_TTL_SECONDS },
   );
   return json(200, { url, expiresInSeconds: PRESIGN_TTL_SECONDS });
+}
+
+/** Report grounding budget: cap injected report text so the assembled
+ * prompt stays well within the harness context window (report.md can be
+ * large; the chat only needs the deliverable, not every source appendix). */
+const CHAT_REPORT_MAX_CHARS = 60_000;
+
+/**
+ * Chat over a run's generated report. A report-grounded agent answers the
+ * end-user's question using ONLY the run's report as source material.
+ *
+ * The endpoint is synchronous (fits the 29s router budget for a single
+ * grounded answer) and stateless: the client sends the full conversation
+ * each call, and we reuse one runtime session id per run so the harness
+ * also sees the turns as native context. We reuse the run's REPORT worker
+ * harness (plan.report.worker) — it already owns the report's tone and
+ * domain framing — invoked with a chat-scoped system prompt override so it
+ * answers questions instead of re-writing a brief. Reads are open to any
+ * signed-in user (shared-workspace model, matching getRun); the model spend
+ * per question is a single bounded invocation.
+ */
+async function chatAboutReport(
+  runId: string,
+  event: HttpEvent,
+): Promise<HttpResponse> {
+  const validated = validateChatReport(parseBody(event));
+  if (!validated.ok) {
+    return badRequest(validated.error);
+  }
+  const tableName = requireEnv('TABLE_NAME');
+  const run = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.run(runId) }),
+  );
+  if (!run.Item) {
+    return notFound(`run ${runId}`);
+  }
+  const reportKey =
+    typeof run.Item.reportArtifactKey === 'string'
+      ? run.Item.reportArtifactKey
+      : undefined;
+  if (!reportKey) {
+    return json(409, {
+      error:
+        'this run has no report yet — a report is available once the run finishes (succeeded or partial)',
+    });
+  }
+
+  // Resolve the report worker's harness ARN from the run's plan-of-record;
+  // fall back to any registered worker if the plan can't be read.
+  const workerMap = JSON.parse(requireEnv('WORKER_HARNESS_MAP')) as Record<
+    string,
+    string
+  >;
+  const plan = run.Item.plan as { report?: { worker?: string } } | undefined;
+  const reportWorker = plan?.report?.worker;
+  const harnessArn =
+    (reportWorker && workerMap[reportWorker]) ??
+    Object.values(workerMap)[0];
+  if (!harnessArn) {
+    return json(500, { error: 'no worker harness registered to answer report questions' });
+  }
+
+  // Fetch the report markdown (bounded) as the sole grounding source.
+  let reportText: string;
+  try {
+    const object = await s3.send(
+      new GetObjectCommand({ Bucket: requireEnv('BUCKET_NAME'), Key: reportKey }),
+    );
+    const body = (await object.Body?.transformToString()) ?? '';
+    reportText =
+      body.length <= CHAT_REPORT_MAX_CHARS
+        ? body
+        : `${body.slice(0, CHAT_REPORT_MAX_CHARS)}\n\n[report truncated at ${CHAT_REPORT_MAX_CHARS} characters]`;
+  } catch (error) {
+    console.error('chatAboutReport: report fetch failed', { runId, reportKey, error });
+    return json(502, { error: 'could not load the report artifact for this run' });
+  }
+
+  const messages = validated.value.messages;
+  const question = messages[messages.length - 1]!.content;
+  // Prior turns become transcript context; the latest user turn is the
+  // question. (We also reuse a stable runtime session per run, so the
+  // harness retains its own memory across questions.)
+  const priorTurns = messages
+    .slice(0, -1)
+    .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`)
+    .join('\n\n');
+
+  const systemPrompt = [
+    'You are a helpful assistant answering questions about a specific report that was already generated for the user.',
+    'Ground every answer ONLY in the report provided below. Do not invent facts or use outside knowledge.',
+    "If the report does not contain the answer, say so plainly and point to the closest relevant section instead of guessing.",
+    'Be concise and direct. Use Markdown (short paragraphs, bullet lists, or tables) when it aids clarity. Quote figures and section names from the report where helpful.',
+    '',
+    '# Report',
+    reportText,
+  ].join('\n');
+
+  const userMessage = priorTurns
+    ? `# Conversation so far\n\n${priorTurns}\n\n# New question\n\n${question}`
+    : question;
+
+  try {
+    const answer = await invokeHarnessText({
+      harnessArn,
+      // Runtime session ids must be ≥33 chars; a run-scoped, chat-namespaced
+      // id keeps every question for a run in the same harness session.
+      sessionId: `chat-${runId}-report-session`.padEnd(33, '0'),
+      text: userMessage,
+      systemPrompt,
+    });
+    return json(200, {
+      message: { role: 'assistant', content: answer.trim() },
+    });
+  } catch (error) {
+    console.error('chatAboutReport: harness invocation failed', { runId, error });
+    return json(502, {
+      error: 'the report assistant could not answer right now — please try again',
+    });
+  }
 }
 
 function publicWorkflow(item: Record<string, unknown>): Record<string, unknown> {

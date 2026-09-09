@@ -17,6 +17,7 @@ export type RouteKey =
   | 'listRuns'
   | 'getRun'
   | 'getArtifactUrl'
+  | 'chatAboutReport'
   | 'getSettings'
   | 'putAgentConfig'
   | 'putOrgSettings';
@@ -60,6 +61,14 @@ const ROUTES: RouteSpec[] = [
     key: 'getArtifactUrl',
     method: 'GET',
     segments: ['runs', ':runId', 'artifact-url'],
+  },
+  // Chat over a run's generated report: a report-grounded agent answers
+  // end-user questions synchronously. Owner/read semantics match getRun
+  // (any signed-in user may ask), but it triggers model spend — see handler.
+  {
+    key: 'chatAboutReport',
+    method: 'POST',
+    segments: ['runs', ':runId', 'chat'],
   },
   // Runtime configuration (D-19): readable by all signed-in users; PUTs are
   // admin-gated in the handler.
