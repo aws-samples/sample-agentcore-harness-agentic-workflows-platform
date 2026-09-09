@@ -326,6 +326,18 @@ export class MarketingWorkflowStack extends Stack {
           }
         : {}),
     });
+    // OAC for Lambda URLs needs BOTH permissions on the CloudFront principal
+    // (AWS docs: "Grant CloudFront permission to access the Lambda function
+    // URL"); CDK's FunctionUrlOrigin.withOriginAccessControl adds only
+    // InvokeFunctionUrl, and without InvokeFunction the origin answers 403
+    // before the handler runs (live finding, D-30).
+    if (api.chatStreamFunction) {
+      api.chatStreamFunction.addPermission('InvokeFromWebAppDistribution', {
+        principal: new iam.ServicePrincipal('cloudfront.amazonaws.com'),
+        action: 'lambda:InvokeFunction',
+        sourceArn: `arn:${this.partition}:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
+      });
+    }
     new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
       destinationBucket: siteBucket,
       distribution,

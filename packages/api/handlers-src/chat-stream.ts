@@ -64,9 +64,22 @@ function defaultVerifier(): JwtVerifier {
   return cachedVerifier;
 }
 
+/**
+ * Header carrying the Cognito id token. Behind CloudFront OAC (signing
+ * behavior `always`) the viewer's `Authorization` header is REPLACED by
+ * CloudFront's SigV4 signature before it reaches the origin, so the SPA sends
+ * the token in this custom header instead. `Authorization: Bearer` is still
+ * accepted for direct callers.
+ */
+export const TOKEN_HEADER = 'x-agentic-token';
+
 function bearerToken(event: FunctionUrlEvent): string | undefined {
-  const header =
-    event.headers?.authorization ?? event.headers?.Authorization ?? undefined;
+  const headers = event.headers ?? {};
+  const custom = headers[TOKEN_HEADER] ?? headers[TOKEN_HEADER.toUpperCase()];
+  if (custom && custom.trim()) {
+    return custom.trim().replace(/^Bearer\s+/i, '');
+  }
+  const header = headers.authorization ?? headers.Authorization ?? undefined;
   const match = header ? /^Bearer\s+(.+)$/i.exec(header.trim()) : null;
   return match?.[1];
 }

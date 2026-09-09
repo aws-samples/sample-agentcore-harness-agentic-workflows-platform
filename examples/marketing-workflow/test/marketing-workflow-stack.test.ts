@@ -76,10 +76,16 @@ describe('MarketingWorkflowStack', () => {
         SigningProtocol: 'sigv4',
       }),
     });
-    // OAC needs InvokeFunctionUrl for the distribution principal — and
+    // OAC on a Lambda URL needs BOTH InvokeFunctionUrl and InvokeFunction for
+    // the distribution principal (AWS docs; CDK adds only the first) — and
     // nothing anonymous.
+    const cfPermissions = Object.values(template.findResources('AWS::Lambda::Permission'))
+      .map((p) => (p as { Properties: { Principal: string; Action: string } }).Properties)
+      .filter((p) => p.Principal === 'cloudfront.amazonaws.com')
+      .map((p) => p.Action)
+      .sort();
+    expect(cfPermissions).toEqual(['lambda:InvokeFunction', 'lambda:InvokeFunctionUrl']);
     const permissions = JSON.stringify(template.findResources('AWS::Lambda::Permission'));
-    expect(permissions).toContain('cloudfront.amazonaws.com');
     expect(permissions).not.toContain('"FunctionUrlAuthType":"NONE"');
     template.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'AWS_IAM' });
   });

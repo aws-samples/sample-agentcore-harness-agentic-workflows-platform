@@ -234,11 +234,13 @@ export async function chatAboutReportStream(
     response = await fetch(`${base}/runs/${encodeURIComponent(runId)}/chat`, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${token}`,
+        // NOT `authorization`: CloudFront Origin Access Control replaces that
+        // header with its own SigV4 signature on the way to the origin, so
+        // the Cognito token rides in a custom header the handler reads.
+        'x-agentic-token': token,
         'content-type': 'application/json',
-        // CloudFront Origin Access Control signs origin requests with
-        // SigV4; for bodied requests it needs the payload hash from the
-        // viewer. Without it the origin rejects the signature.
+        // OAC signs origin requests with SigV4; for bodied requests it needs
+        // the payload hash from the viewer or the origin rejects it.
         'x-amz-content-sha256': await sha256Hex(body),
       },
       body,

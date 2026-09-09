@@ -119,6 +119,20 @@ beforeEach(() => {
 });
 
 describe('runChatStream — auth and pre-stream failures (plain JSON)', () => {
+  it('accepts the token from the custom header (CloudFront OAC overwrites Authorization)', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    const verify = vi.fn().mockResolvedValue({});
+    await runChatStream(
+      event(question, { headers: { 'x-agentic-token': 'cust0m', authorization: 'AWS4-HMAC-SHA256 Credential=…' } }),
+      sink,
+      { verifier: { verify }, invoke: vi.fn().mockReturnValue(deltas('ok')) },
+    );
+    // The custom header wins; the SigV4 Authorization header is ignored.
+    expect(verify).toHaveBeenCalledWith('cust0m');
+    expect(sink.status).toBe(200);
+  });
+
   it('401s without a bearer token before any AWS call', async () => {
     const sink = new FakeSink();
     const invoke = vi.fn();
