@@ -50,3 +50,121 @@ body {
 .markdown img {
   max-width: 100%;
 }
+
+/* ── Report workspace: section hover "Ask", in-place review, inline diff ── */
+
+.report-section {
+  position: relative;
+}
+
+/* The ✦ button sits in the right gutter of a section's heading row and only
+   shows on hover/focus so the report stays clean while reading. */
+.report-section-ask {
+  position: absolute;
+  top: 0.35em;
+  right: 0;
+  opacity: 0;
+  transition: opacity 120ms ease-in-out;
+}
+.report-section:hover .report-section-ask,
+.report-section-ask:focus-within {
+  opacity: 1;
+}
+
+.report-review {
+  border: 1px solid var(--color-border-status-info, #0972d3);
+  border-radius: 8px;
+  margin: 12px 0;
+  overflow: hidden;
+}
+
+/* Action bar stays visible while a long section scrolls under it. */
+.report-review-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 14px;
+  background: var(--color-background-status-info, #f2f8fd);
+  border-bottom: 1px solid var(--color-border-status-info, #0972d3);
+}
+
+.report-review-pane {
+  padding: 8px 14px;
+}
+
+.report-diff {
+  padding: 4px 0;
+}
+
+/* Every diff block is real rendered Markdown with a coloured gutter. Colors
+   use Cloudscape status tokens so dark mode is handled. */
+.report-diff-block {
+  padding: 2px 14px 2px 12px;
+  border-left: 4px solid transparent;
+}
+.report-diff-block .markdown > :first-child {
+  margin-top: 0.35em;
+}
+.report-diff-block .markdown > :last-child {
+  margin-bottom: 0.35em;
+}
+.report-diff-removed {
+  border-left-color: var(--color-text-status-error, #d91515);
+  background: var(--color-background-status-error, #fff7f7);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-text-status-error, #d91515);
+  opacity: 0.85;
+}
+.report-diff-added {
+  border-left-color: var(--color-text-status-success, #037f0c);
+  background: var(--color-background-status-success, #f2fcf3);
+}
+
+/* ── Chat drawer ── */
+
+.chat-turn {
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+.chat-turn-user {
+  background: var(--color-background-container-header, #f4f4f4);
+  margin-left: 12%;
+}
+.chat-turn-assistant {
+  margin-right: 4%;
+}
+.chat-proposal {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-divider-default, #e9ebed);
+  border-radius: 8px;
+}
+.chat-proposal-active {
+  border-color: var(--color-border-status-info, #0972d3);
+  background: var(--color-background-status-info, #f2f8fd);
+}
+
+/* Drawer layout: header + messages scroll with the drawer; the composer is
+   sticky at the bottom of the drawer's scroll container so the input is
+   always reachable without scrolling past a long conversation. */
+.chat-drawer {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 0 20px;
+}
+.chat-drawer-header {
+  padding: 16px 0 12px;
+  border-bottom: 1px solid var(--color-border-divider-default, #e9ebed);
+  margin-bottom: 12px;
+}
+.chat-drawer-body {
+  flex: 1 1 auto;
+  padding-bottom: 12px;
+}
+.chat-drawer-composer {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 0 16px;
+  background: var(--color-background-layout-panel-content, #ffffff);
+  border-top: 1px solid var(--color-border-divider-default, #e9ebed);
+}

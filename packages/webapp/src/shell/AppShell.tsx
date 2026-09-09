@@ -38,7 +38,17 @@ interface ShellApi {
   setBreadcrumbs: (items: BreadcrumbGroupProps.Item[]) => void;
   /** Push a flash notification; successes auto-dismiss after 5 s. */
   notify: (message: FlashMessage) => void;
+  /**
+   * Mount a page-scoped panel in the AppLayout tools drawer (right side,
+   * stays put while content scrolls). Pass null to remove it; pages must
+   * clear it on unmount. The drawer toggle appears only while a panel is set.
+   */
+  setTools: (panel: ReactNode | null) => void;
+  /** Programmatically open the tools drawer (e.g. when seeding a prompt). */
+  openTools: () => void;
 }
+
+const TOOLS_OPEN_KEY = 'agentic.toolsOpen';
 
 const ShellContext = createContext<ShellApi | null>(null);
 
@@ -72,6 +82,16 @@ export default function AppShell() {
   const [breadcrumbs, setBreadcrumbsState] = useState<BreadcrumbGroupProps.Item[]>([]);
   const [flashItems, setFlashItems] = useState<FlashbarProps.MessageDefinition[]>([]);
   const flashId = useRef(0);
+  const [tools, setToolsState] = useState<ReactNode | null>(null);
+  // Remembered per browser; default open so the panel is discoverable the
+  // first time a page offers one.
+  const [toolsOpen, setToolsOpenState] = useState<boolean>(
+    () => localStorage.getItem(TOOLS_OPEN_KEY) !== 'false',
+  );
+  const setToolsOpen = useCallback((open: boolean) => {
+    setToolsOpenState(open);
+    localStorage.setItem(TOOLS_OPEN_KEY, String(open));
+  }, []);
 
   const dismissFlash = useCallback((id: string) => {
     setFlashItems((current) => current.filter((item) => item.id !== id));
@@ -106,7 +126,12 @@ export default function AppShell() {
     setBreadcrumbsState([{ text: 'Agentic Workflows', href: '/' }, ...items]);
   }, []);
 
-  const shellApi = useMemo<ShellApi>(() => ({ setBreadcrumbs, notify }), [setBreadcrumbs, notify]);
+  const setTools = useCallback((panel: ReactNode | null) => setToolsState(panel), []);
+  const openTools = useCallback(() => setToolsOpen(true), [setToolsOpen]);
+  const shellApi = useMemo<ShellApi>(
+    () => ({ setBreadcrumbs, notify, setTools, openTools }),
+    [setBreadcrumbs, notify, setTools, openTools],
+  );
 
   const navItems = useMemo<SideNavigationProps['items']>(() => {
     const items: SideNavigationProps.Item[] = [
@@ -173,7 +198,11 @@ export default function AppShell() {
       </div>
       <AppLayout
         headerSelector="#app-top-nav"
-        toolsHide
+        toolsHide={tools === null}
+        tools={tools ?? undefined}
+        toolsOpen={tools !== null && toolsOpen}
+        onToolsChange={({ detail }) => setToolsOpen(detail.open)}
+        toolsWidth={420}
         navigationOpen={navigationOpen}
         onNavigationChange={({ detail }) => setNavigationOpen(detail.open)}
         ariaLabels={{
@@ -181,6 +210,9 @@ export default function AppShell() {
           navigationToggle: 'Open navigation',
           navigationClose: 'Close navigation',
           notifications: 'Notifications',
+          tools: 'Report assistant',
+          toolsToggle: 'Open report assistant',
+          toolsClose: 'Close report assistant',
         }}
         navigation={
           <SideNavigation
