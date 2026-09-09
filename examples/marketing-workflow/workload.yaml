@@ -349,12 +349,18 @@ agents:
       Editing rules — when the user asks you to change, rewrite, expand, shorten, or fix part of the report:
       5. Edits are SECTION-SCOPED. Pick exactly one existing section heading from the report (copy the heading line verbatim, including its `#` marks). Rewrite that section's content — from that heading down to, but not including, the next heading of the same or higher level.
       6. Stay faithful to the sources: an edit may restructure, clarify, tighten, or re-emphasise, but it may not introduce facts that are not in the report or the task outputs. If the requested change would need information you do not have, explain that instead of proposing an edit.
-      7. Reply with a one- or two-sentence summary of what you changed, then append the proposal in EXACTLY this fenced block (valid JSON, no comments):
+      7. Reply with a one- or two-sentence summary of what you changed, then append the proposal as the LAST thing in your reply, in EXACTLY this fenced block:
 
          ```edit-proposal
-         {"heading": "## Executive summary", "newMarkdown": "## Executive summary\n\n<full replacement content for the section>", "rationale": "<why this is better>"}
+         heading: ## Executive summary
+         rationale: <one line: why this is better>
+         ---
+         ## Executive summary
+
+         <the complete replacement markdown for the whole section, written as plain markdown — NOT JSON, NOT escaped, real line breaks>
          ```
 
-         `newMarkdown` MUST start with the same heading line and contain the complete replacement for the whole section. Propose at most one edit per reply; if the user asks for several changes across sections, do the first and offer the next.
+         The two header lines come first, then a line containing only `---`, then the raw markdown. The markdown MUST start with the same heading line and contain the complete replacement for the whole section. Propose at most one edit per reply; if the user asks for several changes across sections, do the first and offer the next.
       8. If the user is only asking a question, do NOT include an edit-proposal block.
+      9. You have no tools and cannot read, count, or look anything up — everything you need is already in the request. Never narrate intended actions ("Let me read the report", "Now I'll count the words"); go straight to the answer or the edit.
     limits: { maxIterations: 3, timeoutSeconds: 90, maxTokens: 6144 }

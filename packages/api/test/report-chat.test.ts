@@ -94,6 +94,43 @@ describe('parseChatAnswer', () => {
       rationale: 'Adds the comparison basis.',
     });
   });
+  it('extracts the raw-markdown proposal form (header block + --- + markdown)', () => {
+    const raw = [
+      'Tightened the summary.',
+      '',
+      '```edit-proposal',
+      'heading: ## Executive summary',
+      'rationale: Adds the "comparison basis" — with quotes, unescaped.',
+      '---',
+      '## Executive summary',
+      '',
+      'Revenue grew 12% "year on year" and here\'s a table:',
+      '',
+      '```',
+      'a | b',
+      '```',
+      '```',
+    ].join('\n');
+    const parsed = parseChatAnswer(raw, REPORT);
+    expect(parsed.content).toBe('Tightened the summary.');
+    expect(parsed.proposalIssue).toBeUndefined();
+    expect(parsed.proposedEdit).toEqual({
+      heading: '## Executive summary',
+      rationale: 'Adds the "comparison basis" — with quotes, unescaped.',
+      newMarkdown:
+        '## Executive summary\n\nRevenue grew 12% "year on year" and here\'s a table:\n\n```\na | b\n```',
+    });
+  });
+
+  it('reports a raw-form proposal with no separator as an issue', () => {
+    const parsed = parseChatAnswer(
+      'x\n```edit-proposal\nheading: ## Sources\n## Sources\n\ny\n```',
+      REPORT,
+    );
+    expect(parsed.proposedEdit).toBeUndefined();
+    expect(parsed.proposalIssue).toMatch(/separator/);
+  });
+
   it('drops proposals that cannot be applied, keeping the answer', () => {
     const unknownHeading = parseChatAnswer(
       'x\n```edit-proposal\n{"heading":"## Nope","newMarkdown":"## Nope\\n\\ny"}\n```',

@@ -116,7 +116,54 @@ export function buildChatRequest(args: {
   return sections.join('\n\n');
 }
 
-const PROPOSAL_FENCE = /```edit-proposal\s*\n([\s\S]*?)\n\s*```/;
+// The proposal body may itself contain fenced code (a table sample, say), so
+// match to the LAST closing fence rather than the first.
+const PROPOSAL_FENCE = /```edit-proposal\s*\n([\s\S]*)\n\s*```\s*$/;
+
+/**
+ * Decode the fenced proposal body. Preferred form is a small header block
+ * plus RAW markdown:
+ *
+ *   heading: ## Executive summary
+ *   rationale: why
+ *   ---
+ *   ## Executive summary
+ *   …the full replacement, verbatim…
+ *
+ * Models cannot reliably JSON-escape ~2k chars of prose (live: ~1 in 3
+ * proposals had a stray quote deep in `newMarkdown`), so raw markdown is
+ * the contract. The original JSON form is still accepted.
+ */
+export function decodeProposalBody(
+  body: string,
+): { heading: string; newMarkdown: string; rationale?: string } | { error: string } {
+  const trimmed = body.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      return {
+        heading: typeof parsed.heading === 'string' ? parsed.heading : '',
+        newMarkdown: typeof parsed.newMarkdown === 'string' ? parsed.newMarkdown : '',
+        ...(typeof parsed.rationale === 'string' ? { rationale: parsed.rationale } : {}),
+      };
+    } catch {
+      return { error: 'the assistant returned a malformed edit proposal' };
+    }
+  }
+  const separator = /\n-{3,}\s*\n/.exec(trimmed);
+  if (!separator) {
+    return { error: 'the edit proposal was missing the "---" separator before the markdown' };
+  }
+  const header = trimmed.slice(0, separator.index);
+  const newMarkdown = trimmed.slice(separator.index + separator[0].length);
+  const field = (name: string) =>
+    new RegExp(`^${name}:\\s*(.+)$`, 'mi').exec(header)?.[1]?.trim();
+  return {
+    heading: field('heading') ?? '',
+    newMarkdown,
+    ...(field('rationale') ? { rationale: field('rationale')! } : {}),
+  };
+}
 
 export interface ParsedAnswer {
   /** The answer with the proposal block removed. */
@@ -137,20 +184,15 @@ export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnsw
     return { content: raw.trim() };
   }
   const content = raw.replace(PROPOSAL_FENCE, '').trim();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(match[1]!);
-  } catch {
-    return { content, proposalIssue: 'the assistant returned a malformed edit proposal' };
+  const decoded = decodeProposalBody(match[1]!);
+  if ('error' in decoded) {
+    return { content, proposalIssue: decoded.error };
   }
-  const candidate = (parsed ?? {}) as Record<string, unknown>;
-  const heading = typeof candidate.heading === 'string' ? candidate.heading.trim() : '';
-  const newMarkdown =
-    typeof candidate.newMarkdown === 'string' ? candidate.newMarkdown.trim() : '';
-  const rationale =
-    typeof candidate.rationale === 'string' && candidate.rationale.trim()
-      ? candidate.rationale.trim().slice(0, 512)
-      : undefined;
+  const heading = decoded.heading.trim();
+  const newMarkdown = decoded.newMarkdown.trim();
+  const rationale = decoded.rationale?.trim()
+    ? decoded.rationale.trim().slice(0, 512)
+    : undefined;
   if (!heading || !newMarkdown) {
     return { content, proposalIssue: 'the edit proposal was missing a heading or replacement' };
   }
