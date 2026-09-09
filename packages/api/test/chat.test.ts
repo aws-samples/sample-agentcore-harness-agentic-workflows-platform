@@ -266,11 +266,13 @@ describe('POST /runs/{runId}/chat', () => {
     expect(response.statusCode).toBe(200);
     expect(body.reportVersion).toBe(2);
     expect(body.message.content).toBe('Tightened it.');
-    expect(body.message.proposedEdit).toEqual({
-      heading: '## Executive summary',
-      newMarkdown: '## Executive summary\n\nUp 12% YoY.',
-      rationale: 'basis',
-    });
+    expect(body.message.proposedEdits).toEqual([
+      {
+        heading: '## Executive summary',
+        newMarkdown: '## Executive summary\n\nUp 12% YoY.',
+        rationale: 'basis',
+      },
+    ]);
     // Grounded on the LATEST version's key.
     expect((mocks.s3Send.mock.calls[0]![0] as { input: { Key: string } }).input.Key).toBe(v2Key);
     const args = mocks.invokeHarnessText.mock.calls[0]![0] as { text: string };
@@ -284,7 +286,7 @@ describe('POST /runs/{runId}/chat', () => {
       'x\n```edit-proposal\n{"heading":"## Missing","newMarkdown":"## Missing\\n\\ny"}\n```',
     );
     const body = JSON.parse((await handler(chatEvent({ messages: [{ role: 'user', content: 'q' }] }))).body);
-    expect(body.message.proposedEdit).toBeUndefined();
+    expect(body.message.proposedEdits).toBeUndefined();
     expect(body.message.proposalIssue).toMatch(/section not found/);
   });
 

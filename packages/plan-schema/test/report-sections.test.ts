@@ -124,3 +124,53 @@ describe('replaceReportSection', () => {
     expect(replaceReportSection(DOC, '## Nope', '## Nope\n\nx').ok).toBe(false);
   });
 });
+
+import { applySectionEdits } from '../src/report-sections';
+
+describe('applySectionEdits', () => {
+  it('applies several section edits at once, preserving everything else', () => {
+    const result = applySectionEdits(DOC, [
+      { heading: '## Sources', newMarkdown: '## Sources\n\n- b' },
+      { heading: '## Executive summary', newMarkdown: '## Executive summary\n\nUp 12% YoY.' },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.markdown).toContain('# Q2 Brief\n\n## Executive summary\n\nUp 12% YoY.\n\n## Key findings');
+    expect(result.markdown).toContain('### No/low\n\nFlat.');
+    expect(result.markdown.endsWith('## Sources\n\n- b')).toBe(true);
+  });
+  it('resolves headings against the original document regardless of edit order', () => {
+    // Editing an earlier section that grows must not shift the later target.
+    const result = applySectionEdits(DOC, [
+      {
+        heading: '## Executive summary',
+        newMarkdown: '## Executive summary\n\nA\n\nB\n\nC\n\nD\n\nE',
+      },
+      { heading: '### No/low', newMarkdown: '### No/low\n\nDown.' },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The No/low section spans through the fenced block (up to ## Sources),
+    // so the whole thing is replaced.
+    expect(result.markdown).toContain('### No/low\n\nDown.\n\n## Sources');
+    expect(result.markdown).not.toContain('# not a heading');
+    expect(result.markdown).toContain('### Premiumisation\n\nUp.');
+  });
+  it('reports the failing edit by index', () => {
+    const missing = applySectionEdits(DOC, [
+      { heading: '## Sources', newMarkdown: '## Sources\n\n- b' },
+      { heading: '## Nope', newMarkdown: '## Nope\n\nx' },
+    ]);
+    expect(missing).toEqual({ ok: false, index: 1, error: 'section not found: "## Nope"' });
+    const duplicate = applySectionEdits(DOC, [
+      { heading: '## Sources', newMarkdown: '## Sources\n\n- b' },
+      { heading: '## Sources', newMarkdown: '## Sources\n\n- c' },
+    ]);
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.error).toMatch(/same section/);
+    const badLevel = applySectionEdits(DOC, [
+      { heading: '## Sources', newMarkdown: '# Sources\n\n- b' },
+    ]);
+    expect(badLevel.ok).toBe(false);
+  });
+});

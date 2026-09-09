@@ -3,21 +3,17 @@
  * editor as page content, plus the "Ask the report" chat mounted in the
  * AppLayout tools drawer so it stays alongside the report while you scroll.
  *
- * Reviewing an edit proposal happens IN the report, not in the drawer: the
- * drawer shows a compact card (section, rationale, change summary) with
- * Review / Save; Review scrolls to the section and swaps it into review mode
- * — a pinned action bar (Accept / Edit / Dismiss, Diff / Proposed / Current)
- * over an inline block-level diff. The report pane has the width and the
- * context; the drawer never has to show a side-by-side.
+ * Review model: the assistant proposes ALL its edits at once (one entry per
+ * affected section). Review renders the WHOLE report with every proposed
+ * section shown as an inline diff and its own Accept / Keep current toggle;
+ * a sticky bar at the top offers Accept all / Keep all current and saves the
+ * composed result ("Save 2 of 3 sections"). Unchanged sections render as
+ * normal text, so each change is seen in context. Nothing is written until
+ * the user saves.
  *
- * Editing model (section-scoped, human-in-the-loop):
- *   - Nothing is written until the user Accepts (save) or Edits (open the
- *     editor with the proposal applied, tweak, save). Manual edits use the
- *     same editor and save path.
- *   - Saves create report.v<n>.md; the generated original is never
- *     overwritten. `baseVersion` gives optimistic concurrency (409 → reload).
- *   - Editing is offered to the workflow owner or an org admin (mirrors the
- *     API's owner-or-admin rule; the server enforces it regardless).
+ * Saves create report.v<n>.md; the generated original is never overwritten.
+ * `baseVersion` gives optimistic concurrency (409 → reload). Editing is
+ * offered to the workflow owner or an org admin (the server enforces it).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Alert from '@cloudscape-design/components/alert';
@@ -35,11 +31,10 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Textarea from '@cloudscape-design/components/textarea';
 import {
+  applySectionEdits,
   extractReportSection,
   findReportSection,
   listReportSections,
-  replaceReportSection,
-  type ReportSection,
 } from '@agentic-platform/plan-schema';
 import {
   api,
@@ -51,7 +46,6 @@ import {
 } from '../api';
 import { formatDateTime } from '../format';
 import {
-  composeFromHunks,
   describeDiff,
   diffMarkdown,
   groupHunks,
@@ -81,12 +75,16 @@ interface LoadedReport {
   text: string;
 }
 
-/** A proposal under review in the report pane. */
+type ReviewView = 'diff' | 'proposed' | 'current';
+
+/** A set of proposed section edits under review in the report pane. */
 interface Review {
-  edit: ProposedEdit;
-  /** Index of the chat message that carried it (to mark it applied). */
+  edits: ProposedEdit[];
+  /** Per-edit decision: true = accept proposed, false = keep current. */
+  accepted: boolean[];
+  /** Index of the chat message that carried the proposal (to mark saved). */
   messageIndex: number;
-  view: 'diff' | 'proposed' | 'current';
+  view: ReviewView;
 }
 
 export default function ReportWorkspace(props: ReportWorkspaceProps) {
@@ -128,7 +126,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
 
   // Proposal review (in the report pane)
   const [review, setReview] = useState<Review | null>(null);
-  const reviewRef = useRef<HTMLDivElement>(null);
+  const reviewTopRef = useRef<HTMLDivElement>(null);
 
   // Follow the latest version when a save (ours or someone else's) lands.
   useEffect(() => {
@@ -208,9 +206,11 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
     [runId, latest.version, props],
   );
 
-  function spliced(edit: ProposedEdit): string | null {
-    if (!loaded) return null;
-    const result = replaceReportSection(loaded.text, edit.heading, edit.newMarkdown);
+  /** The report with the ACCEPTED subset of a review's edits applied. */
+  function composeReview(base: string, r: Review): string | null {
+    const chosen = r.edits.filter((_, i) => r.accepted[i]);
+    if (chosen.length === 0) return base;
+    const result = applySectionEdits(base, chosen);
     if (!result.ok) {
       setSaveError(`Couldn't apply the proposal: ${result.error}`);
       return null;
@@ -218,35 +218,46 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
     return result.markdown;
   }
 
-  /** Open the editor with the proposal applied to the latest text. */
-  function editProposal(edit: ProposedEdit) {
-    const markdown = spliced(edit);
-    if (markdown === null) return;
-    setSelectedVersion(latest.version);
-    startEditing(markdown);
-    setNote(edit.rationale ?? `Revised ${sectionTitle(edit.heading)}`);
+  function reviewNote(r: Review): string {
+    const total = r.edits.length;
+    const count = r.accepted.filter(Boolean).length;
+    const names = r.edits
+      .filter((_, i) => r.accepted[i])
+      .map((e) => sectionTitle(e.heading))
+      .join(', ');
+    const scope = count === total ? `${total} section${total === 1 ? '' : 's'}` : `${count} of ${total} sections`;
+    return `Revised ${scope}: ${names}`;
   }
 
-  /** One-click: splice and save the proposal as a new version. */
-  async function acceptProposal(edit: ProposedEdit, messageIndex: number, noteSuffix?: string) {
-    const markdown = spliced(edit);
+  /** Save the review's accepted sections as a new version. */
+  async function saveReview(r: Review) {
+    if (!loaded) return false;
+    const markdown = composeReview(loaded.text, r);
     if (markdown === null) return false;
-    const base = edit.rationale ?? `Revised ${sectionTitle(edit.heading)}`;
-    const ok = await save(markdown, noteSuffix ? `${base} (${noteSuffix})` : base);
+    const ok = await save(markdown, reviewNote(r));
     if (ok) {
-      setApplied((current) => new Set(current).add(messageIndex));
+      setApplied((current) => new Set(current).add(r.messageIndex));
     }
     return ok;
   }
 
-  /** Put a proposal into review mode in the report and scroll to it. */
-  function reviewProposal(edit: ProposedEdit, messageIndex: number) {
+  /** Open the editor with the accepted sections applied, for hand tweaks. */
+  function editReview(r: Review) {
+    if (!loaded) return;
+    const markdown = composeReview(loaded.text, r);
+    if (markdown === null) return;
+    setSelectedVersion(latest.version);
+    startEditing(markdown);
+    setNote(reviewNote(r));
+  }
+
+  /** Put a proposal set into review mode and scroll to the top of the report. */
+  function reviewProposal(edits: ProposedEdit[], messageIndex: number) {
     setSelectedVersion(latest.version);
     setEditing(false);
-    setReview({ edit, messageIndex, view: 'diff' });
-    // Scroll after the section re-renders in review mode.
+    setReview({ edits, accepted: edits.map(() => true), messageIndex, view: 'diff' });
     window.setTimeout(
-      () => reviewRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+      () => reviewTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
       50,
     );
   }
@@ -280,10 +291,10 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
       setDrafting(false);
       setMessages((current) => [...current, message]);
       setAnsweredVersion(reportVersion);
-      // A fresh proposal goes straight into review so the user sees it in
+      // Fresh proposals go straight into review so the user sees them in
       // context without an extra click; the drawer card keeps the summary.
-      if (message.proposedEdit && loaded) {
-        reviewProposal(message.proposedEdit, history.length);
+      if (message.proposedEdits && message.proposedEdits.length > 0 && loaded) {
+        reviewProposal(message.proposedEdits, history.length);
       }
     } catch (e) {
       setStreaming(null);
@@ -327,7 +338,6 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
         }}
         onDismissError={() => setChatError(null)}
         onReview={reviewProposal}
-        onAccept={acceptProposal}
       />,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -429,25 +439,27 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
         )}
 
         {loaded && !editing && (
-          <ReportBody
-            text={loaded.text}
-            review={viewingLatest ? review : null}
-            reviewRef={reviewRef}
-            canEdit={canEdit}
-            saving={saving}
-            onAsk={askAboutSection}
-            onViewChange={(view) => setReview((r) => (r ? { ...r, view } : r))}
-            onAccept={(section, acceptedCount, total) =>
-              review &&
-              void acceptProposal(
-                { ...review.edit, newMarkdown: section },
-                review.messageIndex,
-                acceptedCount === total ? undefined : `${acceptedCount} of ${total} proposed changes`,
-              )
-            }
-            onEdit={(section) => review && editProposal({ ...review.edit, newMarkdown: section })}
-            onDismiss={() => setReview(null)}
-          />
+          <div ref={reviewTopRef}>
+            <ReportBody
+              text={loaded.text}
+              review={viewingLatest ? review : null}
+              canEdit={canEdit}
+              saving={saving}
+              onAsk={askAboutSection}
+              onViewChange={(view) => setReview((r) => (r ? { ...r, view } : r))}
+              onDecide={(index, value) =>
+                setReview((r) =>
+                  r ? { ...r, accepted: r.accepted.map((a, i) => (i === index ? value : a)) } : r,
+                )
+              }
+              onDecideAll={(value) =>
+                setReview((r) => (r ? { ...r, accepted: r.edits.map(() => value) } : r))
+              }
+              onSave={() => review && void saveReview(review)}
+              onEdit={() => review && editReview(review)}
+              onDismiss={() => setReview(null)}
+            />
+          </div>
         )}
 
         {loaded && editing && (
@@ -510,42 +522,44 @@ function downloadMarkdown(report: LoadedReport) {
   URL.revokeObjectURL(url);
 }
 
-// ── Report body: heading-chunked sections, hover "Ask", in-place review ──
+// ── Report body: heading-chunked sections, hover "Ask", whole-report review ─
 
 interface ReportBodyProps {
   text: string;
   review: Review | null;
-  reviewRef: React.RefObject<HTMLDivElement>;
   canEdit: boolean;
   saving: boolean;
   onAsk: (heading: string) => void;
-  onViewChange: (view: Review['view']) => void;
-  onAccept: (sectionMarkdown: string, acceptedCount: number, total: number) => void;
-  onEdit: (sectionMarkdown: string) => void;
+  onViewChange: (view: ReviewView) => void;
+  onDecide: (editIndex: number, accepted: boolean) => void;
+  onDecideAll: (accepted: boolean) => void;
+  onSave: () => void;
+  onEdit: () => void;
   onDismiss: () => void;
 }
 
 /**
- * Renders the report as a sequence of chunks split at every heading. The
- * chunk that owns the proposal's section (heading through the next heading
- * of the same or higher level — possibly spanning several chunks) is
- * replaced by the review block; everything else renders normally, so the
- * change is seen in context.
+ * Renders the report as chunks split at every heading. In review mode the
+ * chunks belonging to a proposed section are replaced by that section's
+ * review block (diff + its own decision), every other chunk renders as
+ * normal text, and a sticky summary bar sits above the report.
  */
 function ReportBody(props: ReportBodyProps) {
   const { text, review } = props;
   const lines = useMemo(() => text.split('\n'), [text]);
   const sections = useMemo(() => listReportSections(text), [text]);
 
-  // The reviewed section's line range in the current text (if it applies).
-  const target: ReportSection | undefined = useMemo(
-    () => (review ? findReportSection(text, review.edit.heading) : undefined),
-    [text, review],
-  );
+  // Resolve each proposed edit to a section range in the current text.
+  const targets = useMemo(() => {
+    if (!review) return [];
+    return review.edits.map((edit, index) => ({
+      index,
+      edit,
+      section: findReportSection(text, edit.heading),
+    }));
+  }, [text, review]);
+  const missing = targets.filter((t) => !t.section);
 
-  // Chunks: [0, firstHeading) preamble, then one chunk per heading up to the
-  // next heading of ANY level. The review block swallows every chunk inside
-  // the target range.
   const chunks = useMemo(() => {
     const starts = sections.map((s) => s.startLine);
     const out: Array<{ start: number; end: number; heading?: string }> = [];
@@ -553,59 +567,74 @@ function ReportBody(props: ReportBodyProps) {
       out.push({ start: 0, end: starts[0] ?? lines.length });
     }
     for (let i = 0; i < starts.length; i++) {
-      out.push({
-        start: starts[i]!,
-        end: starts[i + 1] ?? lines.length,
-        heading: sections[i]!.heading,
-      });
+      out.push({ start: starts[i]!, end: starts[i + 1] ?? lines.length, heading: sections[i]!.heading });
     }
     return out;
   }, [sections, lines.length]);
 
   const rendered: React.ReactNode[] = [];
-  let reviewEmitted = false;
+  const emitted = new Set<number>();
   for (const chunk of chunks) {
-    if (target && chunk.start >= target.startLine && chunk.start < target.endLine) {
-      if (!reviewEmitted) {
-        reviewEmitted = true;
+    const owner = targets.find(
+      (t) => t.section && chunk.start >= t.section.startLine && chunk.start < t.section.endLine,
+    );
+    if (owner && owner.section) {
+      if (!emitted.has(owner.index)) {
+        emitted.add(owner.index);
         rendered.push(
-          <div key={`review-${target.startLine}`} ref={props.reviewRef}>
-            <ReviewBlock
-              current={extractReportSection(text, target)}
-              proposed={review!.edit.newMarkdown}
-              rationale={review!.edit.rationale}
-              view={review!.view}
-              canEdit={props.canEdit}
-              saving={props.saving}
-              onViewChange={props.onViewChange}
-              onAccept={props.onAccept}
-              onEdit={props.onEdit}
-              onDismiss={props.onDismiss}
-            />
-          </div>,
+          <SectionReview
+            key={`review-${owner.section.startLine}`}
+            ordinal={owner.index + 1}
+            total={review!.edits.length}
+            current={extractReportSection(text, owner.section)}
+            proposed={owner.edit.newMarkdown}
+            rationale={owner.edit.rationale}
+            view={review!.view}
+            accepted={review!.accepted[owner.index] ?? true}
+            canEdit={props.canEdit}
+            onDecide={(value) => props.onDecide(owner.index, value)}
+          />,
         );
       }
       continue;
     }
-    const chunkText = lines.slice(chunk.start, chunk.end).join('\n');
     rendered.push(
       <SectionChunk
         key={`${chunk.start}`}
-        text={chunkText}
+        text={lines.slice(chunk.start, chunk.end).join('\n')}
         heading={chunk.heading}
         onAsk={props.onAsk}
       />,
     );
   }
-  if (review && !target) {
-    rendered.unshift(
-      <Alert key="review-missing" type="warning" dismissible onDismiss={props.onDismiss}>
-        The proposed section “{sectionTitle(review.edit.heading)}” isn’t in this version of the
-        report.
-      </Alert>,
-    );
-  }
-  return <div className="report-body">{rendered}</div>;
+
+  return (
+    <div className="report-body">
+      {review && (
+        <ReviewBar
+          edits={review.edits}
+          accepted={review.accepted}
+          view={review.view}
+          canEdit={props.canEdit}
+          saving={props.saving}
+          currentText={text}
+          onViewChange={props.onViewChange}
+          onDecideAll={props.onDecideAll}
+          onSave={props.onSave}
+          onEdit={props.onEdit}
+          onDismiss={props.onDismiss}
+        />
+      )}
+      {missing.length > 0 && (
+        <Alert type="warning">
+          {missing.length === 1
+            ? `The proposed section “${sectionTitle(missing[0]!.edit.heading)}” isn’t in this version of the report and will be skipped.`
+            : `${missing.length} proposed sections aren’t in this version of the report and will be skipped.`}
+        </Alert>
+      )}
+      {rendered}
+    </div>
+  );
 }
 
 /** One heading-led chunk with a hover "Ask about this section" affordance. */
@@ -627,124 +656,149 @@ function SectionChunk(props: { text: string; heading?: string; onAsk: (heading: 
   );
 }
 
-interface ReviewBlockProps {
-  current: string;
-  proposed: string;
-  rationale?: string;
-  view: Review['view'];
+interface ReviewBarProps {
+  edits: ProposedEdit[];
+  accepted: boolean[];
+  view: ReviewView;
   canEdit: boolean;
   saving: boolean;
-  onViewChange: (view: Review['view']) => void;
-  /** Save the section as composed from the accepted hunks. */
-  onAccept: (sectionMarkdown: string, acceptedCount: number, total: number) => void;
-  /** Open the editor with the section as composed from the accepted hunks. */
-  onEdit: (sectionMarkdown: string) => void;
+  currentText: string;
+  onViewChange: (view: ReviewView) => void;
+  onDecideAll: (accepted: boolean) => void;
+  onSave: () => void;
+  onEdit: () => void;
   onDismiss: () => void;
 }
 
-/**
- * The section under review. Changes are grouped into hunks, each with its
- * own Accept / Keep current toggle (all accepted by default); the sticky bar
- * saves whatever subset is accepted. Paired paragraphs show word-level
- * highlights so a reworded sentence reads as an edit, not a replacement.
- */
-function ReviewBlock(props: ReviewBlockProps) {
-  const hunks = useMemo(
-    () => groupHunks(diffMarkdown(props.current, props.proposed)),
-    [props.current, props.proposed],
-  );
-  const changeHunks = useMemo(() => hunks.filter((h) => h.kind === 'change'), [hunks]);
-  const [accepted, setAccepted] = useState<boolean[]>(() => changeHunks.map(() => true));
-  // Reset decisions when a different proposal comes under review.
-  useEffect(() => {
-    setAccepted(changeHunks.map(() => true));
-  }, [changeHunks]);
-  const acceptedCount = accepted.filter(Boolean).length;
-  const composed = useMemo(() => composeFromHunks(hunks, accepted), [hunks, accepted]);
-  const summary = useMemo(
-    () => describeDiff(summarizeDiff(diffMarkdown(props.current, props.proposed))),
-    [props.current, props.proposed],
-  );
-  const setAll = (value: boolean) => setAccepted(changeHunks.map(() => value));
+/** Sticky summary bar above the report while a proposal set is under review. */
+function ReviewBar(props: ReviewBarProps) {
+  const total = props.edits.length;
+  const count = props.accepted.filter(Boolean).length;
+  const summary = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    for (const edit of props.edits) {
+      const section = findReportSection(props.currentText, edit.heading);
+      if (!section) continue;
+      const s = summarizeDiff(diffMarkdown(extractReportSection(props.currentText, section), edit.newMarkdown));
+      added += s.wordsAdded;
+      removed += s.wordsRemoved;
+    }
+    return `${total} section${total === 1 ? '' : 's'} · +${added} / −${removed} words`;
+  }, [props.edits, props.currentText, total]);
 
   return (
-    <div className="report-review">
+    <div className="report-review-summary">
+      <SpaceBetween direction="horizontal" size="s" alignItems="center">
+        <Box variant="strong">Proposed changes</Box>
+        <Box color="text-body-secondary" fontSize="body-s">
+          {summary}
+        </Box>
+        <SegmentedControl
+          selectedId={props.view}
+          onChange={({ detail }) => props.onViewChange(detail.selectedId as ReviewView)}
+          options={[
+            { id: 'diff', text: 'Diff' },
+            { id: 'proposed', text: 'Proposed' },
+            { id: 'current', text: 'Current' },
+          ]}
+        />
+        {props.canEdit && total > 1 && (
+          <SpaceBetween direction="horizontal" size="xxs">
+            <Button variant="inline-link" onClick={() => props.onDecideAll(true)}>
+              Accept all
+            </Button>
+            <Box color="text-body-secondary">·</Box>
+            <Button variant="inline-link" onClick={() => props.onDecideAll(false)}>
+              Keep all current
+            </Button>
+          </SpaceBetween>
+        )}
+        <SpaceBetween direction="horizontal" size="xs">
+          {props.canEdit && (
+            <>
+              <Button
+                variant="primary"
+                loading={props.saving}
+                disabled={count === 0}
+                disabledReason="No sections accepted — accept at least one, or dismiss."
+                onClick={props.onSave}
+              >
+                {count === total
+                  ? `Save ${total === 1 ? 'change' : 'all changes'}`
+                  : `Save ${count} of ${total} sections`}
+              </Button>
+              <Button disabled={props.saving} onClick={props.onEdit}>
+                Edit
+              </Button>
+            </>
+          )}
+          <Button disabled={props.saving} onClick={props.onDismiss}>
+            Dismiss
+          </Button>
+        </SpaceBetween>
+      </SpaceBetween>
+      {!props.canEdit && (
+        <Box color="text-body-secondary" fontSize="body-s" padding={{ top: 'xxs' }}>
+          Only the workflow owner or an admin can save edits.
+        </Box>
+      )}
+    </div>
+  );
+}
+
+interface SectionReviewProps {
+  ordinal: number;
+  total: number;
+  current: string;
+  proposed: string;
+  rationale?: string;
+  view: ReviewView;
+  accepted: boolean;
+  canEdit: boolean;
+  onDecide: (accepted: boolean) => void;
+}
+
+/**
+ * One proposed section in the report: a header row with its decision toggle
+ * and rationale, then the inline word-level diff (or the proposed/current
+ * text, per the view). Rejected sections dim the proposal in place.
+ */
+function SectionReview(props: SectionReviewProps) {
+  const hunks = useMemo(() => groupHunks(diffMarkdown(props.current, props.proposed)), [props.current, props.proposed]);
+  const summary = useMemo(() => describeDiff(summarizeDiff(diffMarkdown(props.current, props.proposed))), [props.current, props.proposed]);
+  const title = sectionTitle(props.proposed.split('\n')[0] ?? '');
+  return (
+    <div className={`report-review report-review-${props.accepted ? 'accepted' : 'rejected'}`}>
       <div className="report-review-bar">
         <SpaceBetween direction="horizontal" size="s" alignItems="center">
-          <Box variant="strong">Proposed edit</Box>
+          <Box variant="strong">
+            Section {props.ordinal} of {props.total}: {title}
+          </Box>
           <Box color="text-body-secondary" fontSize="body-s">
             {summary}
           </Box>
-          <SegmentedControl
-            selectedId={props.view}
-            onChange={({ detail }) => props.onViewChange(detail.selectedId as Review['view'])}
-            options={[
-              { id: 'diff', text: 'Diff' },
-              { id: 'proposed', text: 'Proposed' },
-              { id: 'current', text: 'Current' },
-            ]}
-          />
-          <SpaceBetween direction="horizontal" size="xs">
-            {props.canEdit && (
-              <>
-                <Button
-                  variant="primary"
-                  loading={props.saving}
-                  disabled={acceptedCount === 0}
-                  disabledReason="No changes accepted — accept at least one, or dismiss."
-                  onClick={() => props.onAccept(composed, acceptedCount, changeHunks.length)}
-                >
-                  {acceptedCount === changeHunks.length
-                    ? 'Save all changes'
-                    : `Save ${acceptedCount} of ${changeHunks.length}`}
-                </Button>
-                <Button disabled={props.saving} onClick={() => props.onEdit(composed)}>
-                  Edit
-                </Button>
-              </>
-            )}
-            <Button disabled={props.saving} onClick={props.onDismiss}>
-              Dismiss
-            </Button>
-          </SpaceBetween>
+          {props.canEdit ? (
+            <SegmentedControl
+              selectedId={props.accepted ? 'accept' : 'keep'}
+              onChange={({ detail }) => props.onDecide(detail.selectedId === 'accept')}
+              options={[
+                { id: 'accept', text: 'Accept', iconName: 'check' },
+                { id: 'keep', text: 'Keep current', iconName: 'undo' },
+              ]}
+            />
+          ) : null}
         </SpaceBetween>
-        <SpaceBetween direction="horizontal" size="s" alignItems="center">
-          {props.rationale && (
-            <Box color="text-body-secondary" fontSize="body-s">
-              {props.rationale}
-            </Box>
-          )}
-          {props.view === 'diff' && changeHunks.length > 1 && (
-            <SpaceBetween direction="horizontal" size="xxs">
-              <Button variant="inline-link" onClick={() => setAll(true)}>
-                Accept all
-              </Button>
-              <Box color="text-body-secondary">·</Box>
-              <Button variant="inline-link" onClick={() => setAll(false)}>
-                Keep all current
-              </Button>
-            </SpaceBetween>
-          )}
-        </SpaceBetween>
-        {!props.canEdit && (
+        {props.rationale && (
           <Box color="text-body-secondary" fontSize="body-s" padding={{ top: 'xxs' }}>
-            Only the workflow owner or an admin can save edits.
+            {props.rationale}
           </Box>
         )}
       </div>
-      {props.view === 'diff' && (
-        <HunkDiff
-          hunks={hunks}
-          accepted={accepted}
-          canEdit={props.canEdit}
-          onToggle={(index, value) =>
-            setAccepted((current) => current.map((v, i) => (i === index ? value : v)))
-          }
-        />
-      )}
+      {props.view === 'diff' && <HunkDiff hunks={hunks} />}
       {props.view === 'proposed' && (
         <div className="report-review-pane">
-          <Markdown text={composed} />
+          <Markdown text={props.accepted ? props.proposed : props.current} />
         </div>
       )}
       {props.view === 'current' && (
@@ -756,21 +810,13 @@ function ReviewBlock(props: ReviewBlockProps) {
   );
 }
 
-interface HunkDiffProps {
-  hunks: Hunk[];
-  accepted: boolean[];
-  canEdit: boolean;
-  onToggle: (changeIndex: number, accepted: boolean) => void;
-}
-
 /**
- * Hunk-by-hunk inline diff. Within a change hunk, removed and added blocks
- * are paired positionally; a pair that reads as one edited paragraph renders
+ * Inline diff for one section. Removed/added blocks within a change are
+ * paired positionally; a pair that reads as one edited paragraph renders
  * merged with <del>/<ins> word highlights, otherwise stacked. Every block is
  * still rendered Markdown.
  */
-function HunkDiff({ hunks, accepted, canEdit, onToggle }: HunkDiffProps) {
-  let changeIndex = -1;
+function HunkDiff({ hunks }: { hunks: Hunk[] }) {
   return (
     <div className="report-diff">
       {hunks.map((hunk, hunkIndex) => {
@@ -781,9 +827,6 @@ function HunkDiff({ hunks, accepted, canEdit, onToggle }: HunkDiffProps) {
             </div>
           );
         }
-        changeIndex++;
-        const index = changeIndex;
-        const isAccepted = accepted[index] ?? true;
         const pairs = Math.max(hunk.removed.length, hunk.added.length);
         const rows: React.ReactNode[] = [];
         for (let p = 0; p < pairs; p++) {
@@ -814,26 +857,7 @@ function HunkDiff({ hunks, accepted, canEdit, onToggle }: HunkDiffProps) {
           }
         }
         return (
-          <div
-            key={hunkIndex}
-            className={`report-diff-hunk${isAccepted ? ' report-diff-hunk-accepted' : ' report-diff-hunk-rejected'}`}
-          >
-            <div className="report-diff-hunk-bar">
-              <Box fontSize="body-s" color="text-body-secondary">
-                Change {index + 1}
-                {!isAccepted && ' — keeping current text'}
-              </Box>
-              {canEdit && (
-                <SegmentedControl
-                  selectedId={isAccepted ? 'accept' : 'keep'}
-                  onChange={({ detail }) => onToggle(index, detail.selectedId === 'accept')}
-                  options={[
-                    { id: 'accept', text: 'Accept', iconName: 'check' },
-                    { id: 'keep', text: 'Keep current', iconName: 'undo' },
-                  ]}
-                />
-              )}
-            </div>
+          <div key={hunkIndex} className="report-diff-change">
             {rows}
           </div>
         );
@@ -862,8 +886,7 @@ interface ChatPanelProps {
   onSend: () => void;
   onClear: () => void;
   onDismissError: () => void;
-  onReview: (edit: ProposedEdit, messageIndex: number) => void;
-  onAccept: (edit: ProposedEdit, messageIndex: number) => Promise<boolean>;
+  onReview: (edits: ProposedEdit[], messageIndex: number) => void;
 }
 
 function ChatPanel(props: ChatPanelProps) {
@@ -879,82 +902,81 @@ function ChatPanel(props: ChatPanelProps) {
         <Header variant="h2">Ask the report</Header>
         <Box color="text-body-secondary" fontSize="body-s">
           {canEdit
-            ? 'Answers are grounded in this report and its task outputs. Ask for a change and the assistant proposes a section edit you can review in the report.'
+            ? 'Answers are grounded in this report and its task outputs. Ask for changes and the assistant proposes section edits you review in the report — accept or keep each section.'
             : 'Answers are grounded in this report and its task outputs.'}
         </Box>
       </div>
       <div className="chat-drawer-body">
-      <SpaceBetween size="m">
-        {props.stale && (
-          <Alert type="info">
-            The report is now v{props.latestVersion}. New answers use the latest version.
-          </Alert>
-        )}
-        {messages.length === 0 ? (
-          <Box color="text-body-secondary">
-            Try “Summarize the key findings”, “Where did the 12% figure come from?”
-            {canEdit ? ', or “Rewrite the executive summary to lead with the risks”.' : '.'}
-            <Box padding={{ top: 's' }} fontSize="body-s">
-              Tip: hover a section heading in the report and use the chat button to ask about it.
+        <SpaceBetween size="m">
+          {props.stale && (
+            <Alert type="info">
+              The report is now v{props.latestVersion}. New answers use the latest version.
+            </Alert>
+          )}
+          {messages.length === 0 ? (
+            <Box color="text-body-secondary">
+              Try “Summarize the key findings”, “Where did the 12% figure come from?”
+              {canEdit
+                ? ', or “Tighten the executive summary and turn the risks into a table”.'
+                : '.'}
+              <Box padding={{ top: 's' }} fontSize="body-s">
+                Tip: hover a section heading in the report and use the chat button to ask about it.
+              </Box>
             </Box>
-          </Box>
-        ) : (
-          <SpaceBetween size="s">
-            {messages.map((message, index) => (
-              <div key={index} className={`chat-turn chat-turn-${message.role}`}>
-                <Box fontSize="body-s" color="text-body-secondary">
-                  {message.role === 'user' ? 'You' : 'Report assistant'}
-                </Box>
-                {message.role === 'assistant' ? (
-                  <SpaceBetween size="xs">
-                    {message.content && <Markdown text={message.content} />}
-                    {message.proposalIssue && <Alert type="warning">{message.proposalIssue}</Alert>}
-                    {message.proposedEdit && (
-                      <ProposalSummary
-                        edit={message.proposedEdit}
-                        currentText={props.currentText}
-                        canEdit={canEdit}
-                        applied={props.applied.has(index)}
-                        reviewing={props.reviewing === index}
-                        disabled={props.busy}
-                        onReview={() => props.onReview(message.proposedEdit!, index)}
-                        onAccept={() => props.onAccept(message.proposedEdit!, index)}
-                      />
-                    )}
-                  </SpaceBetween>
-                ) : (
-                  <Box variant="p">{message.content}</Box>
-                )}
-              </div>
-            ))}
-            {props.busy && props.streaming !== null && (
-              <div className="chat-turn chat-turn-assistant">
-                <Box fontSize="body-s" color="text-body-secondary">
-                  Report assistant
-                </Box>
-                {props.streaming ? (
-                  <SpaceBetween size="xs">
-                    <Markdown text={props.streaming} />
-                    {props.drafting && (
-                      <StatusIndicator type="loading">Drafting a section edit…</StatusIndicator>
-                    )}
-                  </SpaceBetween>
-                ) : (
-                  <StatusIndicator type="loading">
-                    {props.drafting ? 'Drafting a section edit…' : 'Thinking…'}
-                  </StatusIndicator>
-                )}
-              </div>
-            )}
-            <div ref={bottomRef} />
-            <Box textAlign="right">
-              <Button variant="inline-link" disabled={props.busy} onClick={props.onClear}>
-                Clear conversation
-              </Button>
-            </Box>
-          </SpaceBetween>
-        )}
-      </SpaceBetween>
+          ) : (
+            <SpaceBetween size="s">
+              {messages.map((message, index) => (
+                <div key={index} className={`chat-turn chat-turn-${message.role}`}>
+                  <Box fontSize="body-s" color="text-body-secondary">
+                    {message.role === 'user' ? 'You' : 'Report assistant'}
+                  </Box>
+                  {message.role === 'assistant' ? (
+                    <SpaceBetween size="xs">
+                      {message.content && <Markdown text={message.content} />}
+                      {message.proposalIssue && <Alert type="warning">{message.proposalIssue}</Alert>}
+                      {message.proposedEdits && message.proposedEdits.length > 0 && (
+                        <ProposalSummary
+                          edits={message.proposedEdits}
+                          currentText={props.currentText}
+                          applied={props.applied.has(index)}
+                          reviewing={props.reviewing === index}
+                          onReview={() => props.onReview(message.proposedEdits!, index)}
+                        />
+                      )}
+                    </SpaceBetween>
+                  ) : (
+                    <Box variant="p">{message.content}</Box>
+                  )}
+                </div>
+              ))}
+              {props.busy && props.streaming !== null && (
+                <div className="chat-turn chat-turn-assistant">
+                  <Box fontSize="body-s" color="text-body-secondary">
+                    Report assistant
+                  </Box>
+                  {props.streaming ? (
+                    <SpaceBetween size="xs">
+                      <Markdown text={props.streaming} />
+                      {props.drafting && (
+                        <StatusIndicator type="loading">Drafting section edits…</StatusIndicator>
+                      )}
+                    </SpaceBetween>
+                  ) : (
+                    <StatusIndicator type="loading">
+                      {props.drafting ? 'Drafting section edits…' : 'Thinking…'}
+                    </StatusIndicator>
+                  )}
+                </div>
+              )}
+              <div ref={bottomRef} />
+              <Box textAlign="right">
+                <Button variant="inline-link" disabled={props.busy} onClick={props.onClear}>
+                  Clear conversation
+                </Button>
+              </Box>
+            </SpaceBetween>
+          )}
+        </SpaceBetween>
       </div>
       {/* Composer pinned to the bottom of the drawer's scroll area. */}
       <div className="chat-drawer-composer">
@@ -972,7 +994,7 @@ function ChatPanel(props: ChatPanelProps) {
             actionButtonAriaLabel="Send"
             actionButtonIconName="send"
             placeholder={
-              canEdit ? 'Ask a question or request a change' : 'Ask a question about this report'
+              canEdit ? 'Ask a question or request changes' : 'Ask a question about this report'
             }
             maxRows={5}
           />
@@ -983,61 +1005,52 @@ function ChatPanel(props: ChatPanelProps) {
 }
 
 interface ProposalSummaryProps {
-  edit: ProposedEdit;
+  edits: ProposedEdit[];
   currentText: string | null;
-  canEdit: boolean;
   applied: boolean;
   reviewing: boolean;
-  disabled: boolean;
   onReview: () => void;
-  onAccept: () => Promise<boolean>;
 }
 
-/** Compact drawer card: what changed and how much; review happens in the report. */
+/** Compact drawer card: which sections and how much; review happens in the report. */
 function ProposalSummary(props: ProposalSummaryProps) {
-  const { edit, currentText } = props;
-  const [saving, setSaving] = useState(false);
-  const summary = useMemo(() => {
-    if (!currentText) return null;
-    const section = findReportSection(currentText, edit.heading);
-    if (!section) return 'section not found in the current version';
-    return describeDiff(summarizeDiff(diffMarkdown(extractReportSection(currentText, section), edit.newMarkdown)));
-  }, [currentText, edit]);
+  const { edits, currentText } = props;
+  const rows = useMemo(
+    () =>
+      edits.map((edit) => {
+        const section = currentText ? findReportSection(currentText, edit.heading) : undefined;
+        const summary =
+          currentText && section
+            ? describeDiff(summarizeDiff(diffMarkdown(extractReportSection(currentText, section), edit.newMarkdown)))
+            : currentText
+              ? 'not in the current version'
+              : null;
+        return { title: sectionTitle(edit.heading), summary };
+      }),
+    [edits, currentText],
+  );
   return (
     <div className={`chat-proposal${props.reviewing ? ' chat-proposal-active' : ''}`}>
       <SpaceBetween size="xs">
-        <Box variant="strong">Proposed edit: {sectionTitle(edit.heading)}</Box>
-        {summary && (
-          <Box color="text-body-secondary" fontSize="body-s">
-            {summary}
-          </Box>
-        )}
-        <SpaceBetween direction="horizontal" size="xs">
-          <Button
-            variant={props.canEdit ? 'normal' : 'primary'}
-            disabled={props.applied}
-            onClick={props.onReview}
-          >
-            {props.reviewing ? 'Reviewing…' : 'Review in report'}
-          </Button>
-          {props.canEdit && (
-            <Button
-              variant="primary"
-              loading={saving}
-              disabled={props.disabled || props.applied}
-              onClick={async () => {
-                setSaving(true);
-                try {
-                  await props.onAccept();
-                } finally {
-                  setSaving(false);
-                }
-              }}
-            >
-              {props.applied ? 'Saved' : 'Save'}
-            </Button>
-          )}
-        </SpaceBetween>
+        <Box variant="strong">
+          Proposed changes to {edits.length} section{edits.length === 1 ? '' : 's'}
+        </Box>
+        <ul className="chat-proposal-list">
+          {rows.map((row, i) => (
+            <li key={i}>
+              <Box variant="span">{row.title}</Box>
+              {row.summary && (
+                <Box variant="span" color="text-body-secondary" fontSize="body-s">
+                  {' '}
+                  — {row.summary}
+                </Box>
+              )}
+            </li>
+          ))}
+        </ul>
+        <Button variant="primary" disabled={props.applied} onClick={props.onReview}>
+          {props.applied ? 'Saved' : props.reviewing ? 'Reviewing in report…' : 'Review in report'}
+        </Button>
       </SpaceBetween>
     </div>
   );

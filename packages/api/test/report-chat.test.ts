@@ -88,11 +88,13 @@ describe('parseChatAnswer', () => {
     const parsed = parseChatAnswer(raw, REPORT);
     expect(parsed.content).toBe('Tightened the summary.');
     expect(parsed.proposalIssue).toBeUndefined();
-    expect(parsed.proposedEdit).toEqual({
-      heading: '## Executive summary',
-      newMarkdown: '## Executive summary\n\nRevenue grew 12% year on year.',
-      rationale: 'Adds the comparison basis.',
-    });
+    expect(parsed.proposedEdits).toEqual([
+      {
+        heading: '## Executive summary',
+        newMarkdown: '## Executive summary\n\nRevenue grew 12% year on year.',
+        rationale: 'Adds the comparison basis.',
+      },
+    ]);
   });
   it('extracts the raw-markdown proposal form (header block + --- + markdown)', () => {
     const raw = [
@@ -114,35 +116,71 @@ describe('parseChatAnswer', () => {
     const parsed = parseChatAnswer(raw, REPORT);
     expect(parsed.content).toBe('Tightened the summary.');
     expect(parsed.proposalIssue).toBeUndefined();
-    expect(parsed.proposedEdit).toEqual({
-      heading: '## Executive summary',
-      rationale: 'Adds the "comparison basis" — with quotes, unescaped.',
-      newMarkdown:
-        '## Executive summary\n\nRevenue grew 12% "year on year" and here\'s a table:\n\n```\na | b\n```',
-    });
+    expect(parsed.proposedEdits).toEqual([
+      {
+        heading: '## Executive summary',
+        rationale: 'Adds the "comparison basis" — with quotes, unescaped.',
+        newMarkdown:
+          '## Executive summary\n\nRevenue grew 12% "year on year" and here\'s a table:\n\n```\na | b\n```',
+      },
+    ]);
   });
 
-  it('infers a proposal from an unfenced inline section rewrite', () => {
-    const body = 'Revenue grew 12% year on year, driven by premium wines. '.repeat(5).trim();
-    const raw = `Here is the tightened section:\n\n## Executive summary\n\n${body}\n\nLet me know if you want it shorter.`;
+  it('parses several sections separated by === and normalizes headings to the report', () => {
+    const raw = [
+      'Two sections changed.',
+      '```edit-proposal',
+      'section: ##   Executive summary',
+      'rationale: tighter',
+      '---',
+      '## Executive summary',
+      '',
+      'Up 12% YoY.',
+      '===',
+      'section: ## Sources',
+      '---',
+      '## Sources',
+      '',
+      '- b',
+      '```',
+    ].join('\n');
     const parsed = parseChatAnswer(raw, REPORT);
     expect(parsed.proposalIssue).toBeUndefined();
-    expect(parsed.proposedEdit?.heading).toBe('## Executive summary');
-    // The section runs to the end of the reply (no reliable way to tell a
-    // trailing remark from the rewrite's last paragraph), so the closing
-    // line is absorbed into the proposal — the user sees it in the diff.
-    expect(parsed.proposedEdit?.newMarkdown).toBe(
-      `## Executive summary\n\n${body}\n\nLet me know if you want it shorter.`,
-    );
-    expect(parsed.proposedEdit?.rationale).toMatch(/Inferred/);
-    expect(parsed.content).toBe('Here is the tightened section:');
+    expect(parsed.proposedEdits?.map((e) => e.heading)).toEqual(['## Executive summary', '## Sources']);
+    expect(parsed.proposedEdits?.[0]?.rationale).toBe('tighter');
+    expect(parsed.proposedEdits?.[1]?.newMarkdown).toBe('## Sources\n\n- b');
   });
 
-  it('does not infer from short or unmatched headings', () => {
-    expect(parseChatAnswer('## Executive summary\n\nToo short.', REPORT).proposedEdit).toBeUndefined();
-    expect(
-      parseChatAnswer(`## Not a section\n\n${'x '.repeat(200)}`, REPORT).proposedEdit,
-    ).toBeUndefined();
+  it('keeps the applicable edits and reports the unusable ones', () => {
+    const raw = [
+      'x',
+      '```edit-proposal',
+      'section: ## Sources',
+      '---',
+      '## Sources\n\n- b',
+      '===',
+      'section: ## Nope',
+      '---',
+      '## Nope\n\ny',
+      '===',
+      'section: ## Sources',
+      '---',
+      '## Sources\n\n- dup',
+      '```',
+    ].join('\n');
+    const parsed = parseChatAnswer(raw, REPORT);
+    expect(parsed.proposedEdits?.map((e) => e.heading)).toEqual(['## Sources']);
+    expect(parsed.proposalIssue).toMatch(/section not found: "## Nope"/);
+    expect(parsed.proposalIssue).toMatch(/duplicate edit for "## Sources"/);
+  });
+
+  it('never infers a proposal from unfenced prose (live incident: absorbed chat text into a saved report)', () => {
+    const body = 'Revenue grew 12% year on year, driven by premium wines. '.repeat(5).trim();
+    const raw = `Here is the tightened section:\n\n## Executive summary\n\n${body}\n\nSay "next" to continue.`;
+    const parsed = parseChatAnswer(raw, REPORT);
+    expect(parsed.proposedEdits).toBeUndefined();
+    expect(parsed.proposalIssue).toBeUndefined();
+    expect(parsed.content).toBe(raw);
   });
 
   it('reports a raw-form proposal with no separator as an issue', () => {
@@ -150,7 +188,7 @@ describe('parseChatAnswer', () => {
       'x\n```edit-proposal\nheading: ## Sources\n## Sources\n\ny\n```',
       REPORT,
     );
-    expect(parsed.proposedEdit).toBeUndefined();
+    expect(parsed.proposedEdits).toBeUndefined();
     expect(parsed.proposalIssue).toMatch(/separator/);
   });
 
@@ -160,11 +198,11 @@ describe('parseChatAnswer', () => {
       REPORT,
     );
     expect(unknownHeading.content).toBe('x');
-    expect(unknownHeading.proposedEdit).toBeUndefined();
+    expect(unknownHeading.proposedEdits).toBeUndefined();
     expect(unknownHeading.proposalIssue).toMatch(/section not found/);
 
     const malformed = parseChatAnswer('x\n```edit-proposal\n{not json\n```', REPORT);
-    expect(malformed.proposedEdit).toBeUndefined();
+    expect(malformed.proposedEdits).toBeUndefined();
     expect(malformed.proposalIssue).toMatch(/malformed/);
 
     const missingField = parseChatAnswer(

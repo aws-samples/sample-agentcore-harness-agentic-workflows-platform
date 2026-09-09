@@ -118,9 +118,12 @@ export interface ProposedEdit {
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-  /** Assistant turns only: an applicable edit proposal. */
-  proposedEdit?: ProposedEdit;
-  /** Assistant turns only: why a returned proposal was dropped. */
+  /**
+   * Assistant turns only: applicable section edits, all proposed at once
+   * (one per distinct section). The user accepts or keeps current per section.
+   */
+  proposedEdits?: ProposedEdit[];
+  /** Assistant turns only: why a returned proposal (or part) was dropped. */
   proposalIssue?: string;
 }
 

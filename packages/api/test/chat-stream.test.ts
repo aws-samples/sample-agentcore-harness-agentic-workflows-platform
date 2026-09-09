@@ -277,11 +277,13 @@ describe('runChatStream — event stream', () => {
     expect(types.indexOf('status')).toBeLessThan(types.indexOf('done'));
     const done = events.find((e) => e.type === 'done')!;
     expect((done.message as Record<string, unknown>).content).toBe('Tightened it.');
-    expect((done.message as Record<string, unknown>).proposedEdit).toEqual({
-      heading: '## Executive summary',
-      newMarkdown: '## Executive summary\n\nUp 12% YoY.',
-      rationale: 'basis',
-    });
+    expect((done.message as Record<string, unknown>).proposedEdits).toEqual([
+      {
+        heading: '## Executive summary',
+        newMarkdown: '## Executive summary\n\nUp 12% YoY.',
+        rationale: 'basis',
+      },
+    ]);
   });
 
   it('sends SSE keepalive comments while waiting on the model, then stops', async () => {

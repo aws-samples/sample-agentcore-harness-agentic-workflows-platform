@@ -222,3 +222,46 @@ body {
   padding: 0 1px;
   border-radius: 2px;
 }
+
+/* ── Whole-report review: sticky summary bar + per-section decisions ── */
+
+.report-review-summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--color-background-status-info, #f2f8fd);
+  border: 1px solid var(--color-border-status-info, #0972d3);
+  border-radius: 8px;
+}
+/* Per-section bars sit under the summary bar when both stick. */
+.report-review .report-review-bar {
+  top: 58px;
+}
+.report-review-rejected .report-diff-added,
+.report-review-rejected .report-diff-merged ins {
+  opacity: 0.45;
+}
+.report-review-rejected .report-diff-removed,
+.report-review-rejected .report-diff-merged del {
+  text-decoration: none;
+  opacity: 1;
+}
+.report-review-rejected .report-review-bar {
+  background: var(--color-background-container-header, #f4f4f4);
+  border-bottom-color: var(--color-border-divider-default, #e9ebed);
+}
+.report-review-rejected {
+  border-color: var(--color-border-divider-default, #e9ebed);
+}
+.report-diff-change {
+  margin: 4px 0;
+}
+.chat-proposal-list {
+  margin: 0;
+  padding-left: 18px;
+}
+.chat-proposal-list li {
+  margin: 2px 0;
+}

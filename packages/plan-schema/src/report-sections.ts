@@ -156,3 +156,69 @@ export function replaceReportSection(
   ].join('\n');
   return { ok: true, markdown: next, previous };
 }
+
+/** One section-scoped edit in a multi-section proposal. */
+export interface SectionEdit {
+  heading: string;
+  newMarkdown: string;
+  rationale?: string;
+}
+
+export interface ApplyEditsResult {
+  ok: true;
+  markdown: string;
+}
+export interface ApplyEditsError {
+  ok: false;
+  /** Which edit failed (index into the input) and why. */
+  index: number;
+  error: string;
+}
+
+/**
+ * Apply several section edits to one document, in order. Each edit is
+ * resolved against the document AS MODIFIED by the previous edits, so an
+ * edit that renames a heading doesn't break a later edit that targets the
+ * original name — callers pass headings from the ORIGINAL document, and we
+ * resolve them there first, then splice by line range in the working copy.
+ * Two edits targeting the same section is an error (ambiguous intent).
+ */
+export function applySectionEdits(
+  markdown: string,
+  edits: SectionEdit[],
+): ApplyEditsResult | ApplyEditsError {
+  // Resolve every target against the original, bottom-up so earlier line
+  // ranges stay valid while later ones are spliced.
+  const resolved: Array<{ index: number; section: ReportSection; edit: SectionEdit }> = [];
+  for (const [index, edit] of edits.entries()) {
+    const section = findReportSection(markdown, edit.heading);
+    if (!section) {
+      return { ok: false, index, error: `section not found: "${normalizeHeading(edit.heading)}"` };
+    }
+    if (resolved.some((r) => r.section.startLine === section.startLine)) {
+      return {
+        ok: false,
+        index,
+        error: `two edits target the same section "${section.heading}"`,
+      };
+    }
+    // Validate the replacement's shape against the original section now.
+    const check = replaceReportSection(markdown, edit.heading, edit.newMarkdown);
+    if (!check.ok) {
+      return { ok: false, index, error: check.error };
+    }
+    resolved.push({ index, section, edit });
+  }
+  resolved.sort((a, b) => b.section.startLine - a.section.startLine);
+  let lines = markdown.split('\n');
+  for (const { section, edit } of resolved) {
+    const body = edit.newMarkdown.replace(/\r\n/g, '\n').replace(/\s+$/, '');
+    const isLast = section.endLine >= lines.length;
+    lines = [
+      ...lines.slice(0, section.startLine),
+      ...(isLast ? [body] : [body, '']),
+      ...lines.slice(section.endLine),
+    ];
+  }
+  return { ok: true, markdown: lines.join('\n') };
+}

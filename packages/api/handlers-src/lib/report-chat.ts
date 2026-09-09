@@ -21,8 +21,8 @@ import {
   CHAT_MAX_TURNS_DEFAULT,
   CHAT_MAX_TURNS_LIMIT,
   REPORT_TASK_ID,
+  applySectionEdits,
   findReportSection,
-  replaceReportSection,
   tableKeys,
   type ReportVersion,
 } from '@agentic-platform/plan-schema';
@@ -124,138 +124,131 @@ export function buildChatRequest(args: {
 const PROPOSAL_FENCE = /```edit-proposal\s*\n([\s\S]*)\n\s*```\s*$/;
 
 /**
- * Decode the fenced proposal body. Preferred form is a small header block
- * plus RAW markdown:
+ * Decode the fenced proposal body into one or more section edits.
  *
- *   heading: ## Executive summary
+ * Contract (raw markdown — models cannot reliably JSON-escape long prose):
+ *
+ *   section: ## Executive summary
  *   rationale: why
  *   ---
  *   ## Executive summary
- *   …the full replacement, verbatim…
+ *   …full replacement, verbatim…
+ *   ===
+ *   section: ## 8. Risks
+ *   rationale: why
+ *   ---
+ *   ## 8. Risks
+ *   …
  *
- * Models cannot reliably JSON-escape ~2k chars of prose (live: ~1 in 3
- * proposals had a stray quote deep in `newMarkdown`), so raw markdown is
- * the contract. The original JSON form is still accepted.
+ * `===` on its own line separates sections. `heading:` is accepted as an
+ * alias of `section:`, and the original single-edit JSON form still parses.
  */
 export function decodeProposalBody(
   body: string,
-): { heading: string; newMarkdown: string; rationale?: string } | { error: string } {
+): { edits: ProposedEdit[] } | { error: string } {
   const trimmed = body.trim();
-  if (trimmed.startsWith('{')) {
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      return {
-        heading: typeof parsed.heading === 'string' ? parsed.heading : '',
-        newMarkdown: typeof parsed.newMarkdown === 'string' ? parsed.newMarkdown : '',
-        ...(typeof parsed.rationale === 'string' ? { rationale: parsed.rationale } : {}),
-      };
+      const parsed = JSON.parse(trimmed) as unknown;
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      const edits: ProposedEdit[] = [];
+      for (const item of list as Array<Record<string, unknown>>) {
+        edits.push({
+          heading: typeof item.heading === 'string' ? item.heading : '',
+          newMarkdown: typeof item.newMarkdown === 'string' ? item.newMarkdown : '',
+          ...(typeof item.rationale === 'string' ? { rationale: item.rationale } : {}),
+        });
+      }
+      return { edits };
     } catch {
       return { error: 'the assistant returned a malformed edit proposal' };
     }
   }
-  const separator = /\n-{3,}\s*\n/.exec(trimmed);
-  if (!separator) {
-    return { error: 'the edit proposal was missing the "---" separator before the markdown' };
+  const edits: ProposedEdit[] = [];
+  for (const chunk of trimmed.split(/\n={3,}\s*\n/)) {
+    const part = chunk.trim();
+    if (!part) continue;
+    const separator = /\n-{3,}\s*\n/.exec(part);
+    if (!separator) {
+      return { error: 'an edit proposal was missing the "---" separator before its markdown' };
+    }
+    const header = part.slice(0, separator.index);
+    const newMarkdown = part.slice(separator.index + separator[0].length);
+    const field = (name: string) =>
+      new RegExp(`^${name}:\\s*(.+)$`, 'mi').exec(header)?.[1]?.trim();
+    const heading = field('section') ?? field('heading') ?? '';
+    const rationale = field('rationale');
+    edits.push({ heading, newMarkdown, ...(rationale ? { rationale } : {}) });
   }
-  const header = trimmed.slice(0, separator.index);
-  const newMarkdown = trimmed.slice(separator.index + separator[0].length);
-  const field = (name: string) =>
-    new RegExp(`^${name}:\\s*(.+)$`, 'mi').exec(header)?.[1]?.trim();
-  return {
-    heading: field('heading') ?? '',
-    newMarkdown,
-    ...(field('rationale') ? { rationale: field('rationale')! } : {}),
-  };
+  return { edits };
 }
 
 export interface ParsedAnswer {
   /** The answer with the proposal block removed. */
   content: string;
-  proposedEdit?: ProposedEdit;
-  /** Why a present-but-unusable proposal was dropped (surfaced to the UI). */
+  /** Validated, applicable section edits (one per distinct section). */
+  proposedEdits?: ProposedEdit[];
+  /** Why a present-but-unusable proposal (or part of it) was dropped. */
   proposalIssue?: string;
 }
 
 /**
- * Split the harness reply into visible answer + validated proposal. The
- * proposal is validated against the CURRENT report so "Apply" is guaranteed
- * to splice.
+ * Split the harness reply into visible answer + validated proposals. Every
+ * edit is validated against the CURRENT report, and the whole set must apply
+ * together (applySectionEdits) so the review view is guaranteed to render.
+ * There is deliberately NO inference from unfenced prose: an earlier
+ * heuristic absorbed a trailing "say next to continue" into a saved report
+ * (live incident, v5 of run d66a9f5e).
  */
 export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnswer {
   const match = PROPOSAL_FENCE.exec(raw);
   if (!match) {
-    return inferProposal(raw.trim(), reportMarkdown);
+    return { content: raw.trim() };
   }
   const content = raw.replace(PROPOSAL_FENCE, '').trim();
   const decoded = decodeProposalBody(match[1]!);
   if ('error' in decoded) {
     return { content, proposalIssue: decoded.error };
   }
-  const heading = decoded.heading.trim();
-  const newMarkdown = decoded.newMarkdown.trim();
-  const rationale = decoded.rationale?.trim()
-    ? decoded.rationale.trim().slice(0, 512)
-    : undefined;
-  if (!heading || !newMarkdown) {
-    return { content, proposalIssue: 'the edit proposal was missing a heading or replacement' };
+  const edits: ProposedEdit[] = [];
+  const issues: string[] = [];
+  for (const edit of decoded.edits) {
+    const heading = edit.heading.trim();
+    const newMarkdown = edit.newMarkdown.trim();
+    const rationale = edit.rationale?.trim() ? edit.rationale.trim().slice(0, 512) : undefined;
+    if (!heading || !newMarkdown) {
+      issues.push('an edit was missing its section heading or replacement');
+      continue;
+    }
+    const section = findReportSection(reportMarkdown, heading);
+    if (!section) {
+      issues.push(`section not found: "${heading}"`);
+      continue;
+    }
+    if (edits.some((e) => findReportSection(reportMarkdown, e.heading)?.startLine === section.startLine)) {
+      issues.push(`duplicate edit for "${section.heading}" ignored`);
+      continue;
+    }
+    // Normalize to the report's exact heading line so splicing is exact.
+    edits.push({ heading: section.heading, newMarkdown, ...(rationale ? { rationale } : {}) });
   }
-  const splice = replaceReportSection(reportMarkdown, heading, newMarkdown);
-  if (!splice.ok) {
-    return { content, proposalIssue: `the edit proposal could not be applied: ${splice.error}` };
+  if (edits.length > 0) {
+    const applied = applySectionEdits(reportMarkdown, edits);
+    if (!applied.ok) {
+      // Drop the offending edit and keep the rest.
+      issues.push(`edit for "${edits[applied.index]!.heading}" could not be applied: ${applied.error}`);
+      edits.splice(applied.index, 1);
+      const retry = edits.length > 0 ? applySectionEdits(reportMarkdown, edits) : { ok: true as const, markdown: reportMarkdown };
+      if (!retry.ok) {
+        return { content, proposalIssue: `the edit proposal could not be applied: ${retry.error}` };
+      }
+    }
   }
   return {
     content,
-    proposedEdit: { heading, newMarkdown, ...(rationale ? { rationale } : {}) },
+    ...(edits.length > 0 ? { proposedEdits: edits } : {}),
+    ...(issues.length > 0 ? { proposalIssue: issues.join('; ') } : {}),
   };
-}
-
-/** Minimum body size for an unfenced section rewrite to count as a proposal. */
-const INFERRED_MIN_CHARS = 200;
-
-/**
- * Fallback for replies that rewrite a section INLINE instead of in the fence
- * (live: the model sometimes narrates "here is the revised section:" and
- * pastes it as prose). A wall of rewritten text is unreadable in the chat
- * drawer and, worse, can't be diffed or applied. If the visible reply
- * contains a heading line that matches a report section, treat everything
- * from that heading to the end (or to the next heading of the same/higher
- * level) as the proposal, validate it the same way, and strip it from the
- * visible text so it shows up in the review diff instead.
- */
-function inferProposal(content: string, reportMarkdown: string): ParsedAnswer {
-  const lines = content.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    const heading = /^(#{1,6})\s+\S/.exec(line);
-    if (!heading) continue;
-    const section = findReportSection(reportMarkdown, line);
-    if (!section) continue;
-    // Extend to the next heading of the same or higher level in the reply.
-    let end = lines.length;
-    for (let j = i + 1; j < lines.length; j++) {
-      const next = /^(#{1,6})\s+\S/.exec(lines[j]!.trim());
-      if (next && next[1]!.length <= heading[1]!.length) {
-        end = j;
-        break;
-      }
-    }
-    const body = lines.slice(i, end).join('\n').trim();
-    if (body.length - line.length < INFERRED_MIN_CHARS) continue;
-    // Use the report's exact heading line so the splice matches its level.
-    const newMarkdown = `${section.heading}\n\n${body.slice(line.length).trim()}`;
-    const splice = replaceReportSection(reportMarkdown, section.heading, newMarkdown);
-    if (!splice.ok) continue;
-    const visible = [...lines.slice(0, i), ...lines.slice(end)].join('\n').trim();
-    return {
-      content: visible,
-      proposedEdit: {
-        heading: section.heading,
-        newMarkdown,
-        rationale: 'Inferred from the reply — review the diff before saving.',
-      },
-    };
-  }
-  return { content };
 }
 
 // ── Conversation length limit (org setting) ────────────────────────────────
@@ -450,7 +443,7 @@ export function finalChatPayload(raw: string, context: ChatContext) {
     message: {
       role: 'assistant' as const,
       content: parsed.content,
-      ...(parsed.proposedEdit ? { proposedEdit: parsed.proposedEdit } : {}),
+      ...(parsed.proposedEdits ? { proposedEdits: parsed.proposedEdits } : {}),
       ...(parsed.proposalIssue ? { proposalIssue: parsed.proposalIssue } : {}),
     },
     reportVersion: context.reportVersion,
