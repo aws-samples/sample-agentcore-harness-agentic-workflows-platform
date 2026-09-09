@@ -198,6 +198,116 @@ describe('social_search handler', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('unsupported platform');
   });
+
+  it('projects Instagram discovery results (hashtags/accounts/places) into non-empty posts (live finding)', async () => {
+    // Live-verified response shape: /instagram/search returns three parallel
+    // arrays under the envelope, each entry carrying a `position` rank. The
+    // old generic slimmer projected every entry to {} because none of the
+    // TikTok/YouTube/Threads unwrap keys apply here.
+    vi.stubEnv('ENSEMBLEDATA_API_KEY', 'ed-token');
+    resetKeyCache();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: {
+            hashtags: [
+              {
+                position: 0,
+                hashtag: { name: 'australianredwine', media_count: 3910, id: 1 },
+              },
+              { position: 4, hashtag: { name: 'australianredwines', media_count: 181 } },
+            ],
+            users: [
+              {
+                position: 2,
+                user: {
+                  username: 'penfolds',
+                  full_name: 'Penfolds Wines',
+                  follower_count: 250000,
+                },
+              },
+            ],
+            places: [
+              { position: 5, place: { name: 'Barossa Valley', location: { pk: 42 } } },
+            ],
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await socialSearch(
+      { platform: 'instagram', query: 'australian red wine', maxResults: 5 },
+      undefined,
+    );
+    expect(result.success).toBe(true);
+    const data = result.data as {
+      resultCount: number;
+      posts: Array<{
+        text?: string;
+        author?: string;
+        url?: string;
+        stats?: Record<string, number>;
+      }>;
+      note?: string;
+    };
+    // All four entries have real content — nothing should slim to {}.
+    expect(data.resultCount).toBe(4);
+    expect(data.posts.every((post) => Object.keys(post).length > 0)).toBe(true);
+    // Interleaved by position: hashtag(0), user(2), hashtag(4), place(5).
+    expect(data.posts[0]).toMatchObject({
+      text: '#australianredwine',
+      url: 'https://www.instagram.com/explore/tags/australianredwine/',
+      stats: { mediaCount: 3910 },
+    });
+    expect(data.posts[1]).toMatchObject({
+      author: 'penfolds',
+      text: 'Penfolds Wines',
+      url: 'https://www.instagram.com/penfolds/',
+      stats: { followers: 250000 },
+    });
+    expect(data.posts[2]).toMatchObject({ text: '#australianredwines' });
+    expect(data.posts[3]).toMatchObject({
+      text: 'place: Barossa Valley',
+      url: 'https://www.instagram.com/explore/locations/42/',
+    });
+    expect(data.note).toContain('brand-presence discovery');
+  });
+
+  it('filters slim entries that carry no usable content so resultCount is honest', async () => {
+    // YouTube search interleaves videoRenderer entries with playlist/channel
+    // cards that our unwrap logic doesn't recognise. Previously they became
+    // {} and inflated resultCount; now they're dropped before slicing.
+    vi.stubEnv('ENSEMBLEDATA_API_KEY', 'ed-token');
+    resetKeyCache();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: {
+            data: [
+              {
+                videoRenderer: {
+                  title: { runs: [{ text: 'Real Video' }] },
+                  ownerText: { runs: [{ text: 'A Channel' }] },
+                  videoId: 'abc123',
+                  viewCountText: { simpleText: '1,234 views' },
+                },
+              },
+              { playlistRenderer: { title: { simpleText: 'A playlist card' } } },
+            ],
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await socialSearch(
+      { platform: 'youtube', query: 'anything' },
+      undefined,
+    );
+    expect(result.success).toBe(true);
+    const data = result.data as { resultCount: number; posts: unknown[] };
+    expect(data.resultCount).toBe(1);
+    expect(data.posts).toHaveLength(1);
+  });
 });
 
 describe('patent_search handler (shipped but not registered by default)', () => {

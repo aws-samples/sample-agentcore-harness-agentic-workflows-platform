@@ -49,7 +49,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'social_search',
     description:
-      'Search social media by keyword via EnsembleData. TikTok, YouTube, and Threads return posts with text, author, engagement stats (views/likes/comments/shares), and URLs — TikTok falls back to hashtag search when the keyword index is sparse. Instagram returns matching accounts and hashtags (brand-presence discovery), not posts. Use for consumer sentiment, brand mentions, trends, and campaign signals.',
+      "Search social media by keyword via EnsembleData. TikTok, YouTube, and Threads return posts with text, author, engagement stats (views/likes/comments/shares), and URLs — TikTok falls back to hashtag search when the keyword index is sparse. Instagram is brand-presence discovery (not posts): matching hashtags (with media_count), accounts (with follower_count), and places, each carrying a `url` to open in-app. An empty `posts` array means the platform genuinely returned no matches — broaden the keyword or try another platform; do not retry the same query. Use for consumer sentiment, brand mentions, trends, and campaign signals.",
     inputSchema: {
       type: 'object',
       properties: {

@@ -185,8 +185,18 @@ export async function socialSearch(input: SocialSearchInput): Promise<{
     }
   }
 
+  // Instagram's /search returns accounts/hashtags/places, not posts — the
+  // generic slimmer projects those to {}. Route it through a dedicated
+  // brand-presence projection instead (live finding, 2026-09-08).
   const max = Math.min(Math.max(input.maxResults ?? 10, 1), 20);
-  const posts = items.slice(0, max).map(slimSocialPost);
+  const slimmed =
+    input.platform === 'instagram'
+      ? projectInstagramDiscovery(envelope)
+      : items.map(slimSocialPost).filter(hasContent);
+  const posts = slimmed.slice(0, max);
+  if (input.platform === 'instagram' && !via && posts.length > 0) {
+    via = 'instagram brand-presence discovery (hashtags/accounts/places, not posts)';
+  }
   return {
     platform: input.platform,
     query,
@@ -197,6 +207,92 @@ export async function socialSearch(input: SocialSearchInput): Promise<{
       ? { nextCursor: envelope['nextCursor'] }
       : {}),
   };
+}
+
+/** Any of the SocialPost fields carrying real content. */
+function hasContent(post: SocialPost): boolean {
+  if (post.text || post.author || post.url || post.createdAt) {
+    return true;
+  }
+  return post.stats !== undefined && Object.keys(post.stats).length > 0;
+}
+
+/**
+ * Instagram's /instagram/search returns three parallel arrays under the
+ * envelope: `hashtags`, `users`, `places`. Each carries a `position` field
+ * (relevance rank across all three) and a typed inner object. We interleave
+ * them by `position` and project each into the SocialPost shape so downstream
+ * agents see real, non-empty content — this is brand-presence discovery, not
+ * post retrieval, matching the tool description.
+ */
+function projectInstagramDiscovery(envelope: Record<string, unknown>): SocialPost[] {
+  interface Ranked {
+    position: number;
+    post: SocialPost;
+  }
+  const ranked: Ranked[] = [];
+
+  const hashtags = Array.isArray(envelope['hashtags']) ? envelope['hashtags'] : [];
+  for (const raw of hashtags) {
+    const row = (raw ?? {}) as Record<string, any>;
+    const tag = (row.hashtag ?? {}) as Record<string, any>;
+    const name = firstString(tag.name);
+    if (!name) continue;
+    ranked.push({
+      position: typeof row.position === 'number' ? row.position : Number.MAX_SAFE_INTEGER,
+      post: {
+        text: `#${name}`,
+        url: `https://www.instagram.com/explore/tags/${encodeURIComponent(name)}/`,
+        ...(typeof tag.media_count === 'number'
+          ? { stats: { mediaCount: tag.media_count } }
+          : {}),
+      },
+    });
+  }
+
+  const users = Array.isArray(envelope['users']) ? envelope['users'] : [];
+  for (const raw of users) {
+    const row = (raw ?? {}) as Record<string, any>;
+    const user = (row.user ?? {}) as Record<string, any>;
+    const username = firstString(user.username);
+    if (!username) continue;
+    const fullName = firstString(user.full_name);
+    const stats: Record<string, number> = {};
+    if (typeof user.follower_count === 'number') stats.followers = user.follower_count;
+    ranked.push({
+      position: typeof row.position === 'number' ? row.position : Number.MAX_SAFE_INTEGER,
+      post: {
+        author: username,
+        ...(fullName ? { text: fullName } : {}),
+        url: `https://www.instagram.com/${encodeURIComponent(username)}/`,
+        ...(Object.keys(stats).length > 0 ? { stats } : {}),
+      },
+    });
+  }
+
+  const places = Array.isArray(envelope['places']) ? envelope['places'] : [];
+  for (const raw of places) {
+    const row = (raw ?? {}) as Record<string, any>;
+    const place = (row.place ?? row.location ?? {}) as Record<string, any>;
+    const name = firstString(place.name, place.title);
+    if (!name) continue;
+    const idRaw =
+      place.location?.pk ?? place.pk ?? place.id ?? place.location?.id;
+    const id =
+      typeof idRaw === 'number' ? String(idRaw) : firstString(idRaw);
+    ranked.push({
+      position: typeof row.position === 'number' ? row.position : Number.MAX_SAFE_INTEGER,
+      post: {
+        text: `place: ${name}`,
+        ...(id
+          ? { url: `https://www.instagram.com/explore/locations/${encodeURIComponent(id)}/` }
+          : {}),
+      },
+    });
+  }
+
+  ranked.sort((a, b) => a.position - b.position);
+  return ranked.map((entry) => entry.post);
 }
 
 async function fetchSocialPage(
