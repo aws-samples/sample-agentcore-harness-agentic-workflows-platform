@@ -168,3 +168,10 @@ body {
   background: var(--color-background-layout-panel-content, #ffffff);
   border-top: 1px solid var(--color-border-divider-default, #e9ebed);
 }
+
+/* The drawer is wrapped in Cloudscape TextContent for typography (raw HTML
+   in a drawer doesn't inherit it the way it does inside a Container); undo
+   its default heading margin where the drawer sets its own spacing. */
+.chat-drawer-header h2 {
+  margin: 0 0 4px;
+}

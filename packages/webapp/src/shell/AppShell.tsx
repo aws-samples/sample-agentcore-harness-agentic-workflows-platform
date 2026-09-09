@@ -22,6 +22,7 @@ import Flashbar, { type FlashbarProps } from '@cloudscape-design/components/flas
 import SideNavigation, {
   type SideNavigationProps,
 } from '@cloudscape-design/components/side-navigation';
+import TextContent from '@cloudscape-design/components/text-content';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
 import { isDarkMode, setDarkMode } from '../appearance';
 import { displayName, signOut } from '../auth';
@@ -49,6 +50,7 @@ interface ShellApi {
 }
 
 const TOOLS_OPEN_KEY = 'agentic.toolsOpen';
+const TOOLS_DRAWER_ID = 'report-assistant';
 
 const ShellContext = createContext<ShellApi | null>(null);
 
@@ -198,11 +200,31 @@ export default function AppShell() {
       </div>
       <AppLayout
         headerSelector="#app-top-nav"
-        toolsHide={tools === null}
-        tools={tools ?? undefined}
-        toolsOpen={tools !== null && toolsOpen}
-        onToolsChange={({ detail }) => setToolsOpen(detail.open)}
-        toolsWidth={420}
+        toolsHide
+        // A custom drawer rather than the `tools` slot: `tools` is hard-wired
+        // to the "i" info icon, while drawers take their own trigger icon
+        // (the chat bubble) and are user-resizable.
+        drawers={
+          tools === null
+            ? []
+            : [
+                {
+                  id: TOOLS_DRAWER_ID,
+                  content: <TextContent>{tools}</TextContent>,
+                  trigger: { iconName: 'contact' },
+                  resizable: true,
+                  defaultSize: 420,
+                  ariaLabels: {
+                    drawerName: 'Report assistant',
+                    triggerButton: 'Open report assistant',
+                    closeButton: 'Close report assistant',
+                    resizeHandle: 'Resize report assistant',
+                  },
+                },
+              ]
+        }
+        activeDrawerId={tools !== null && toolsOpen ? TOOLS_DRAWER_ID : null}
+        onDrawerChange={({ detail }) => setToolsOpen(detail.activeDrawerId === TOOLS_DRAWER_ID)}
         navigationOpen={navigationOpen}
         onNavigationChange={({ detail }) => setNavigationOpen(detail.open)}
         ariaLabels={{
@@ -210,9 +232,7 @@ export default function AppShell() {
           navigationToggle: 'Open navigation',
           navigationClose: 'Close navigation',
           notifications: 'Notifications',
-          tools: 'Report assistant',
-          toolsToggle: 'Open report assistant',
-          toolsClose: 'Close report assistant',
+          drawers: 'Panels',
         }}
         navigation={
           <SideNavigation

@@ -392,7 +392,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
                   Edit
                 </Button>
               )}
-              <Button iconName="gen-ai" onClick={() => shell.openTools()}>
+              <Button iconName="contact" onClick={() => shell.openTools()}>
                 Ask the report
               </Button>
             </SpaceBetween>
@@ -599,7 +599,7 @@ function SectionChunk(props: { text: string; heading?: string; onAsk: (heading: 
         <div className="report-section-ask">
           <Button
             variant="inline-icon"
-            iconName="gen-ai"
+            iconName="contact"
             ariaLabel={`Ask about ${sectionTitle(props.heading)}`}
             onClick={() => props.onAsk(props.heading!)}
           />
@@ -752,7 +752,7 @@ function ChatPanel(props: ChatPanelProps) {
             Try “Summarize the key findings”, “Where did the 12% figure come from?”
             {canEdit ? ', or “Rewrite the executive summary to lead with the risks”.' : '.'}
             <Box padding={{ top: 's' }} fontSize="body-s">
-              Tip: hover a section heading in the report and use the ✦ button to ask about it.
+              Tip: hover a section heading in the report and use the chat button to ask about it.
             </Box>
           </Box>
         ) : (
