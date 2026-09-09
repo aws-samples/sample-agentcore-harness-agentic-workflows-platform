@@ -50,7 +50,16 @@ import {
   type ReportVersion,
 } from '../api';
 import { formatDateTime } from '../format';
-import { describeDiff, diffMarkdown, summarizeDiff, type DiffOp } from '../reportDiff';
+import {
+  composeFromHunks,
+  describeDiff,
+  diffMarkdown,
+  groupHunks,
+  joinBlocks,
+  summarizeDiff,
+  wordDiffMarkdown,
+  type Hunk,
+} from '../reportDiff';
 import { useShell } from '../shell/AppShell';
 import Markdown from './Markdown';
 
@@ -219,10 +228,11 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
   }
 
   /** One-click: splice and save the proposal as a new version. */
-  async function acceptProposal(edit: ProposedEdit, messageIndex: number) {
+  async function acceptProposal(edit: ProposedEdit, messageIndex: number, noteSuffix?: string) {
     const markdown = spliced(edit);
     if (markdown === null) return false;
-    const ok = await save(markdown, edit.rationale ?? `Revised ${sectionTitle(edit.heading)}`);
+    const base = edit.rationale ?? `Revised ${sectionTitle(edit.heading)}`;
+    const ok = await save(markdown, noteSuffix ? `${base} (${noteSuffix})` : base);
     if (ok) {
       setApplied((current) => new Set(current).add(messageIndex));
     }
@@ -427,8 +437,15 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
             saving={saving}
             onAsk={askAboutSection}
             onViewChange={(view) => setReview((r) => (r ? { ...r, view } : r))}
-            onAccept={() => review && void acceptProposal(review.edit, review.messageIndex)}
-            onEdit={() => review && editProposal(review.edit)}
+            onAccept={(section, acceptedCount, total) =>
+              review &&
+              void acceptProposal(
+                { ...review.edit, newMarkdown: section },
+                review.messageIndex,
+                acceptedCount === total ? undefined : `${acceptedCount} of ${total} proposed changes`,
+              )
+            }
+            onEdit={(section) => review && editProposal({ ...review.edit, newMarkdown: section })}
             onDismiss={() => setReview(null)}
           />
         )}
@@ -503,8 +520,8 @@ interface ReportBodyProps {
   saving: boolean;
   onAsk: (heading: string) => void;
   onViewChange: (view: Review['view']) => void;
-  onAccept: () => void;
-  onEdit: () => void;
+  onAccept: (sectionMarkdown: string, acceptedCount: number, total: number) => void;
+  onEdit: (sectionMarkdown: string) => void;
   onDismiss: () => void;
 }
 
@@ -618,15 +635,38 @@ interface ReviewBlockProps {
   canEdit: boolean;
   saving: boolean;
   onViewChange: (view: Review['view']) => void;
-  onAccept: () => void;
-  onEdit: () => void;
+  /** Save the section as composed from the accepted hunks. */
+  onAccept: (sectionMarkdown: string, acceptedCount: number, total: number) => void;
+  /** Open the editor with the section as composed from the accepted hunks. */
+  onEdit: (sectionMarkdown: string) => void;
   onDismiss: () => void;
 }
 
-/** The section under review: pinned action bar + inline block diff. */
+/**
+ * The section under review. Changes are grouped into hunks, each with its
+ * own Accept / Keep current toggle (all accepted by default); the sticky bar
+ * saves whatever subset is accepted. Paired paragraphs show word-level
+ * highlights so a reworded sentence reads as an edit, not a replacement.
+ */
 function ReviewBlock(props: ReviewBlockProps) {
-  const ops = useMemo(() => diffMarkdown(props.current, props.proposed), [props.current, props.proposed]);
-  const summary = useMemo(() => describeDiff(summarizeDiff(ops)), [ops]);
+  const hunks = useMemo(
+    () => groupHunks(diffMarkdown(props.current, props.proposed)),
+    [props.current, props.proposed],
+  );
+  const changeHunks = useMemo(() => hunks.filter((h) => h.kind === 'change'), [hunks]);
+  const [accepted, setAccepted] = useState<boolean[]>(() => changeHunks.map(() => true));
+  // Reset decisions when a different proposal comes under review.
+  useEffect(() => {
+    setAccepted(changeHunks.map(() => true));
+  }, [changeHunks]);
+  const acceptedCount = accepted.filter(Boolean).length;
+  const composed = useMemo(() => composeFromHunks(hunks, accepted), [hunks, accepted]);
+  const summary = useMemo(
+    () => describeDiff(summarizeDiff(diffMarkdown(props.current, props.proposed))),
+    [props.current, props.proposed],
+  );
+  const setAll = (value: boolean) => setAccepted(changeHunks.map(() => value));
+
   return (
     <div className="report-review">
       <div className="report-review-bar">
@@ -647,10 +687,18 @@ function ReviewBlock(props: ReviewBlockProps) {
           <SpaceBetween direction="horizontal" size="xs">
             {props.canEdit && (
               <>
-                <Button variant="primary" loading={props.saving} onClick={props.onAccept}>
-                  Accept
+                <Button
+                  variant="primary"
+                  loading={props.saving}
+                  disabled={acceptedCount === 0}
+                  disabledReason="No changes accepted — accept at least one, or dismiss."
+                  onClick={() => props.onAccept(composed, acceptedCount, changeHunks.length)}
+                >
+                  {acceptedCount === changeHunks.length
+                    ? 'Save all changes'
+                    : `Save ${acceptedCount} of ${changeHunks.length}`}
                 </Button>
-                <Button disabled={props.saving} onClick={props.onEdit}>
+                <Button disabled={props.saving} onClick={() => props.onEdit(composed)}>
                   Edit
                 </Button>
               </>
@@ -660,21 +708,43 @@ function ReviewBlock(props: ReviewBlockProps) {
             </Button>
           </SpaceBetween>
         </SpaceBetween>
-        {props.rationale && (
-          <Box color="text-body-secondary" fontSize="body-s" padding={{ top: 'xxs' }}>
-            {props.rationale}
-          </Box>
-        )}
+        <SpaceBetween direction="horizontal" size="s" alignItems="center">
+          {props.rationale && (
+            <Box color="text-body-secondary" fontSize="body-s">
+              {props.rationale}
+            </Box>
+          )}
+          {props.view === 'diff' && changeHunks.length > 1 && (
+            <SpaceBetween direction="horizontal" size="xxs">
+              <Button variant="inline-link" onClick={() => setAll(true)}>
+                Accept all
+              </Button>
+              <Box color="text-body-secondary">·</Box>
+              <Button variant="inline-link" onClick={() => setAll(false)}>
+                Keep all current
+              </Button>
+            </SpaceBetween>
+          )}
+        </SpaceBetween>
         {!props.canEdit && (
           <Box color="text-body-secondary" fontSize="body-s" padding={{ top: 'xxs' }}>
             Only the workflow owner or an admin can save edits.
           </Box>
         )}
       </div>
-      {props.view === 'diff' && <InlineDiff ops={ops} />}
+      {props.view === 'diff' && (
+        <HunkDiff
+          hunks={hunks}
+          accepted={accepted}
+          canEdit={props.canEdit}
+          onToggle={(index, value) =>
+            setAccepted((current) => current.map((v, i) => (i === index ? value : v)))
+          }
+        />
+      )}
       {props.view === 'proposed' && (
         <div className="report-review-pane">
-          <Markdown text={props.proposed} />
+          <Markdown text={composed} />
         </div>
       )}
       {props.view === 'current' && (
@@ -686,15 +756,88 @@ function ReviewBlock(props: ReviewBlockProps) {
   );
 }
 
-/** Block-level inline diff: every block is still real rendered Markdown. */
-function InlineDiff({ ops }: { ops: DiffOp[] }) {
+interface HunkDiffProps {
+  hunks: Hunk[];
+  accepted: boolean[];
+  canEdit: boolean;
+  onToggle: (changeIndex: number, accepted: boolean) => void;
+}
+
+/**
+ * Hunk-by-hunk inline diff. Within a change hunk, removed and added blocks
+ * are paired positionally; a pair that reads as one edited paragraph renders
+ * merged with <del>/<ins> word highlights, otherwise stacked. Every block is
+ * still rendered Markdown.
+ */
+function HunkDiff({ hunks, accepted, canEdit, onToggle }: HunkDiffProps) {
+  let changeIndex = -1;
   return (
     <div className="report-diff">
-      {ops.map((op, index) => (
-        <div key={index} className={`report-diff-block report-diff-${op.kind}`}>
-          <Markdown text={op.text} />
-        </div>
-      ))}
+      {hunks.map((hunk, hunkIndex) => {
+        if (hunk.kind === 'equal') {
+          return (
+            <div key={hunkIndex} className="report-diff-block report-diff-equal">
+              <Markdown text={joinBlocks(hunk.blocks)} />
+            </div>
+          );
+        }
+        changeIndex++;
+        const index = changeIndex;
+        const isAccepted = accepted[index] ?? true;
+        const pairs = Math.max(hunk.removed.length, hunk.added.length);
+        const rows: React.ReactNode[] = [];
+        for (let p = 0; p < pairs; p++) {
+          const before = hunk.removed[p];
+          const after = hunk.added[p];
+          const merged = before && after ? wordDiffMarkdown(before, after) : null;
+          if (merged !== null) {
+            rows.push(
+              <div key={`m${p}`} className="report-diff-block report-diff-merged">
+                <Markdown text={merged} />
+              </div>,
+            );
+            continue;
+          }
+          if (before) {
+            rows.push(
+              <div key={`r${p}`} className="report-diff-block report-diff-removed">
+                <Markdown text={before} />
+              </div>,
+            );
+          }
+          if (after) {
+            rows.push(
+              <div key={`a${p}`} className="report-diff-block report-diff-added">
+                <Markdown text={after} />
+              </div>,
+            );
+          }
+        }
+        return (
+          <div
+            key={hunkIndex}
+            className={`report-diff-hunk${isAccepted ? ' report-diff-hunk-accepted' : ' report-diff-hunk-rejected'}`}
+          >
+            <div className="report-diff-hunk-bar">
+              <Box fontSize="body-s" color="text-body-secondary">
+                Change {index + 1}
+                {!isAccepted && ' — keeping current text'}
+              </Box>
+              {canEdit && (
+                <SegmentedControl
+                  selectedId={isAccepted ? 'accept' : 'keep'}
+                  onChange={({ detail }) => onToggle(index, detail.selectedId === 'accept')}
+                  options={[
+                    { id: 'accept', text: 'Accept', iconName: 'check' },
+                    { id: 'keep', text: 'Keep current', iconName: 'undo' },
+                  ]}
+                />
+              )}
+            </div>
+            {rows}
+          </div>
+        );
+      })}
     </div>
   );
 }

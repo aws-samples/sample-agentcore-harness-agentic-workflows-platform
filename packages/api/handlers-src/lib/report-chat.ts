@@ -19,6 +19,7 @@ import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
   REPORT_TASK_ID,
+  findReportSection,
   replaceReportSection,
   tableKeys,
   type ReportVersion,
@@ -181,7 +182,7 @@ export interface ParsedAnswer {
 export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnswer {
   const match = PROPOSAL_FENCE.exec(raw);
   if (!match) {
-    return { content: raw.trim() };
+    return inferProposal(raw.trim(), reportMarkdown);
   }
   const content = raw.replace(PROPOSAL_FENCE, '').trim();
   const decoded = decodeProposalBody(match[1]!);
@@ -204,6 +205,55 @@ export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnsw
     content,
     proposedEdit: { heading, newMarkdown, ...(rationale ? { rationale } : {}) },
   };
+}
+
+/** Minimum body size for an unfenced section rewrite to count as a proposal. */
+const INFERRED_MIN_CHARS = 200;
+
+/**
+ * Fallback for replies that rewrite a section INLINE instead of in the fence
+ * (live: the model sometimes narrates "here is the revised section:" and
+ * pastes it as prose). A wall of rewritten text is unreadable in the chat
+ * drawer and, worse, can't be diffed or applied. If the visible reply
+ * contains a heading line that matches a report section, treat everything
+ * from that heading to the end (or to the next heading of the same/higher
+ * level) as the proposal, validate it the same way, and strip it from the
+ * visible text so it shows up in the review diff instead.
+ */
+function inferProposal(content: string, reportMarkdown: string): ParsedAnswer {
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    const heading = /^(#{1,6})\s+\S/.exec(line);
+    if (!heading) continue;
+    const section = findReportSection(reportMarkdown, line);
+    if (!section) continue;
+    // Extend to the next heading of the same or higher level in the reply.
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = /^(#{1,6})\s+\S/.exec(lines[j]!.trim());
+      if (next && next[1]!.length <= heading[1]!.length) {
+        end = j;
+        break;
+      }
+    }
+    const body = lines.slice(i, end).join('\n').trim();
+    if (body.length - line.length < INFERRED_MIN_CHARS) continue;
+    // Use the report's exact heading line so the splice matches its level.
+    const newMarkdown = `${section.heading}\n\n${body.slice(line.length).trim()}`;
+    const splice = replaceReportSection(reportMarkdown, section.heading, newMarkdown);
+    if (!splice.ok) continue;
+    const visible = [...lines.slice(0, i), ...lines.slice(end)].join('\n').trim();
+    return {
+      content: visible,
+      proposedEdit: {
+        heading: section.heading,
+        newMarkdown,
+        rationale: 'Inferred from the reply — review the diff before saving.',
+      },
+    };
+  }
+  return { content };
 }
 
 // ── Shared grounding core (router sync route + streaming Function URL) ─────

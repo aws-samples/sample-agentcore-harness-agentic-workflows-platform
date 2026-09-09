@@ -122,6 +122,29 @@ describe('parseChatAnswer', () => {
     });
   });
 
+  it('infers a proposal from an unfenced inline section rewrite', () => {
+    const body = 'Revenue grew 12% year on year, driven by premium wines. '.repeat(5).trim();
+    const raw = `Here is the tightened section:\n\n## Executive summary\n\n${body}\n\nLet me know if you want it shorter.`;
+    const parsed = parseChatAnswer(raw, REPORT);
+    expect(parsed.proposalIssue).toBeUndefined();
+    expect(parsed.proposedEdit?.heading).toBe('## Executive summary');
+    // The section runs to the end of the reply (no reliable way to tell a
+    // trailing remark from the rewrite's last paragraph), so the closing
+    // line is absorbed into the proposal — the user sees it in the diff.
+    expect(parsed.proposedEdit?.newMarkdown).toBe(
+      `## Executive summary\n\n${body}\n\nLet me know if you want it shorter.`,
+    );
+    expect(parsed.proposedEdit?.rationale).toMatch(/Inferred/);
+    expect(parsed.content).toBe('Here is the tightened section:');
+  });
+
+  it('does not infer from short or unmatched headings', () => {
+    expect(parseChatAnswer('## Executive summary\n\nToo short.', REPORT).proposedEdit).toBeUndefined();
+    expect(
+      parseChatAnswer(`## Not a section\n\n${'x '.repeat(200)}`, REPORT).proposedEdit,
+    ).toBeUndefined();
+  });
+
   it('reports a raw-form proposal with no separator as an issue', () => {
     const parsed = parseChatAnswer(
       'x\n```edit-proposal\nheading: ## Sources\n## Sources\n\ny\n```',

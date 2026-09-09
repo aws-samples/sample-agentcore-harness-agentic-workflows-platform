@@ -92,3 +92,57 @@ describe('diffMarkdown + summary', () => {
     expect(describeDiff(summary)).toBe('2 blocks changed · +5 / −6 words');
   });
 });
+
+import { composeFromHunks, groupHunks, joinBlocks, wordDiffMarkdown } from './reportDiff';
+
+describe('groupHunks + composeFromHunks', () => {
+  const before = '## S\n\nIntro.\n\nOld para.\n\n- keep\n- drop';
+  const after = '## S\n\nIntro.\n\nNew para.\n\n- keep\n\nAdded tail.';
+  it('groups alternating equal/change hunks', () => {
+    const hunks = groupHunks(diffMarkdown(before, after));
+    expect(hunks.map((h) => h.kind)).toEqual(['equal', 'change', 'equal', 'change']);
+    expect(hunks[1]).toEqual({ kind: 'change', removed: ['Old para.'], added: ['New para.'] });
+    expect(hunks[3]).toEqual({ kind: 'change', removed: ['- drop'], added: ['Added tail.'] });
+  });
+  it('accepting every hunk reproduces the proposal; rejecting every hunk reproduces the current text', () => {
+    const hunks = groupHunks(diffMarkdown(before, after));
+    expect(composeFromHunks(hunks, [true, true])).toBe(after);
+    expect(composeFromHunks(hunks, [false, false])).toBe(before);
+  });
+  it('mixes decisions per hunk', () => {
+    const hunks = groupHunks(diffMarkdown(before, after));
+    expect(composeFromHunks(hunks, [true, false])).toBe(
+      '## S\n\nIntro.\n\nNew para.\n\n- keep\n- drop',
+    );
+  });
+  it('joinBlocks keeps lists and tables tight and paragraphs spaced', () => {
+    expect(joinBlocks(['a', '- x', '- y', 'b', '| c |', '|---|'])).toBe(
+      'a\n\n- x\n- y\n\nb\n\n| c |\n|---|',
+    );
+  });
+});
+
+describe('wordDiffMarkdown', () => {
+  it('marks changed words with del/ins and leaves the rest untouched', () => {
+    const merged = wordDiffMarkdown(
+      'Revenue grew **12%** in Q2, driven by premium wines.',
+      'Revenue grew **14%** in Q2, driven mainly by premium wines.',
+    );
+    expect(merged).toBe(
+      'Revenue grew **<del>12</del><ins>14</ins>%** in Q2, driven <ins>mainly </ins>by premium wines.',
+    );
+  });
+  it('returns null when the paragraphs are essentially different', () => {
+    expect(
+      wordDiffMarkdown('Alpha beta gamma delta epsilon.', 'Completely unrelated sentence here now.'),
+    ).toBeNull();
+  });
+  it('handles pure appends and removals', () => {
+    expect(wordDiffMarkdown('One two three.', 'One two three. Four.')).toBe(
+      'One two three.<ins> Four.</ins>',
+    );
+    expect(wordDiffMarkdown('One two three. Four.', 'One two three.')).toBe(
+      'One two three.<del> Four.</del>',
+    );
+  });
+});

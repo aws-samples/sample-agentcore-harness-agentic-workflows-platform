@@ -175,3 +175,50 @@ body {
 .chat-drawer-header h2 {
   margin: 0 0 4px;
 }
+
+/* ── Hunk-by-hunk review ── */
+
+.report-diff-hunk {
+  margin: 8px 10px;
+  border: 1px solid var(--color-border-divider-default, #e9ebed);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.report-diff-hunk-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--color-background-container-header, #f4f4f4);
+  border-bottom: 1px solid var(--color-border-divider-default, #e9ebed);
+}
+/* A rejected hunk: dim the proposal so the decision is visible at a glance. */
+.report-diff-hunk-rejected .report-diff-added,
+.report-diff-hunk-rejected .report-diff-merged ins {
+  opacity: 0.45;
+}
+.report-diff-hunk-rejected .report-diff-removed,
+.report-diff-hunk-rejected .report-diff-merged del {
+  text-decoration: none;
+  opacity: 1;
+}
+
+/* Word-level highlights inside a merged paragraph. */
+.report-diff-merged {
+  border-left-color: var(--color-border-status-info, #0972d3);
+}
+.report-diff-merged del {
+  background: var(--color-background-status-error, #fff7f7);
+  color: var(--color-text-status-error, #d91515);
+  text-decoration: line-through;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.report-diff-merged ins {
+  background: var(--color-background-status-success, #f2fcf3);
+  color: var(--color-text-status-success, #037f0c);
+  text-decoration: none;
+  padding: 0 1px;
+  border-radius: 2px;
+}
