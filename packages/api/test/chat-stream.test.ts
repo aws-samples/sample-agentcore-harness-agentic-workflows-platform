@@ -94,9 +94,13 @@ function event(body: unknown, overrides: Partial<FunctionUrlEvent> = {}): Functi
 }
 const question = { messages: [{ role: 'user', content: 'Summarize' }] };
 
-function routeDdb(run: unknown, tasks: unknown[] = []) {
-  mocks.ddbSend.mockImplementation(async (command: { constructor: { name: string } }) =>
-    command.constructor.name === 'QueryCommand' ? { Items: tasks } : run,
+function routeDdb(run: unknown, tasks: unknown[] = [], org: unknown = { Item: undefined }) {
+  mocks.ddbSend.mockImplementation(
+    async (command: { constructor: { name: string }; input: { Key?: { pk?: string } } }) => {
+      if (command.constructor.name === 'QueryCommand') return { Items: tasks };
+      if (command.input.Key?.pk === 'CONFIG') return org;
+      return run;
+    },
   );
 }
 const runItem = (overrides: Record<string, unknown> = {}) => ({

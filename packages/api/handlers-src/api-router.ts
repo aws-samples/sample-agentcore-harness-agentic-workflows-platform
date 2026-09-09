@@ -46,7 +46,9 @@ import {
   chatInvocationArgs,
   finalChatPayload,
   loadChatContext,
+  loadChatMaxTurns,
   reportVersionsOf,
+  turnLimitError,
 } from './lib/report-chat';
 import { ddb, nowIso, requireEnv } from './lib/common';
 import { checkModelIds } from './lib/model-catalog-check';
@@ -507,7 +509,11 @@ async function putAgentConfig(
   return json(200, { name: agentName, ...patch });
 }
 
-/** Admin: set/clear org-wide settings (model catalog override). */
+/**
+ * Admin: set/clear org-wide settings. Tri-state per field (model catalog
+ * override, report-chat turn limit): absent = untouched, null = restore
+ * default, value = set. One UpdateItem applies the whole patch.
+ */
 async function putOrgSettings(event: HttpEvent): Promise<HttpResponse> {
   if (!isAdmin(event)) {
     return forbidden('admin group membership required to edit org settings');
@@ -516,14 +522,22 @@ async function putOrgSettings(event: HttpEvent): Promise<HttpResponse> {
   if (!validated.ok) {
     return badRequest(validated.error);
   }
-  const clears = validated.value.modelCatalog === null;
+  const patch = validated.value;
+  const sets = ['entity = :entity', 'updatedAt = :now', 'updatedBy = :by'];
+  const removes: string[] = [];
+  const values: Record<string, unknown> = {
+    ':entity': 'ORG_SETTINGS',
+    ':now': nowIso(),
+    ':by': callerId(event) ?? 'unknown',
+  };
+
   // D-20: an invalid id only surfaces at run time as a harness
   // RuntimeClientError, so verify against Bedrock in-region at save time.
-  let verified = false;
-  if (!clears) {
-    const check = await checkModelIds(
-      validated.value.modelCatalog!.map((entry) => entry.modelId),
-    );
+  let verified: boolean | undefined;
+  if (patch.modelCatalog === null) {
+    removes.push('modelCatalog');
+  } else if (patch.modelCatalog) {
+    const check = await checkModelIds(patch.modelCatalog.map((entry) => entry.modelId));
     if (check.invalid.length > 0) {
       return json(400, {
         error:
@@ -532,27 +546,33 @@ async function putOrgSettings(event: HttpEvent): Promise<HttpResponse> {
       });
     }
     verified = check.verified;
+    sets.push('modelCatalog = :catalog');
+    values[':catalog'] = patch.modelCatalog;
   }
+
+  if (patch.chatMaxTurns === null) {
+    removes.push('chatMaxTurns');
+  } else if (patch.chatMaxTurns !== undefined) {
+    sets.push('chatMaxTurns = :chatMaxTurns');
+    values[':chatMaxTurns'] = patch.chatMaxTurns;
+  }
+
   await ddb.send(
     new UpdateCommand({
       TableName: requireEnv('TABLE_NAME'),
       Key: tableKeys.orgSettings(),
-      UpdateExpression: clears
-        ? 'REMOVE modelCatalog SET entity = :entity, updatedAt = :now, updatedBy = :by'
-        : 'SET entity = :entity, modelCatalog = :catalog, updatedAt = :now, updatedBy = :by',
-      ExpressionAttributeValues: {
-        ':entity': 'ORG_SETTINGS',
-        ':now': nowIso(),
-        ':by': callerId(event) ?? 'unknown',
-        ...(clears ? {} : { ':catalog': validated.value.modelCatalog }),
-      },
+      UpdateExpression: `SET ${sets.join(', ')}${
+        removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : ''
+      }`,
+      ExpressionAttributeValues: values,
     }),
   );
   return json(200, {
-    modelCatalog: validated.value.modelCatalog,
+    ...(patch.modelCatalog !== undefined ? { modelCatalog: patch.modelCatalog } : {}),
+    ...(patch.chatMaxTurns !== undefined ? { chatMaxTurns: patch.chatMaxTurns } : {}),
     // False when Bedrock listing was unavailable and the save proceeded
     // unverified — the UI can surface a caution.
-    verified: clears ? undefined : verified,
+    ...(verified !== undefined ? { verified } : {}),
   });
 }
 
@@ -943,8 +963,13 @@ async function chatAboutReport(
         'report chat is not enabled for this deployment — add an agent named "report_chat" to the workload',
     });
   }
+  const tableName = requireEnv('TABLE_NAME');
+  const maxTurns = await loadChatMaxTurns(tableName);
+  if (validated.value.messages.length > maxTurns) {
+    return badRequest(turnLimitError(maxTurns));
+  }
   const loaded = await loadChatContext({
-    tableName: requireEnv('TABLE_NAME'),
+    tableName,
     bucketName: requireEnv('BUCKET_NAME'),
     runId,
   });

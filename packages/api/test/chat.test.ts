@@ -88,11 +88,14 @@ function routeDdb(handlers: {
   run?: () => unknown;
   tasks?: () => unknown;
   meta?: () => unknown;
+  org?: () => unknown;
   update?: (input: Record<string, unknown>) => unknown;
 }) {
   mocks.ddbSend.mockImplementation(async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
     const name = command.constructor.name;
     const key = command.input.Key as { pk?: string; sk?: string } | undefined;
+    // Org settings (chat turn limit): default to "not configured".
+    if (name === 'GetCommand' && key?.pk === 'CONFIG') return handlers.org?.() ?? { Item: undefined };
     if (name === 'GetCommand' && key?.pk?.startsWith('RUN#')) return handlers.run?.();
     if (name === 'GetCommand' && key?.pk?.startsWith('WF#')) return handlers.meta?.();
     if (name === 'QueryCommand') return handlers.tasks?.() ?? taskItems([]);
@@ -138,6 +141,29 @@ describe('POST /runs/{runId}/chat', () => {
     expect(response.statusCode).toBe(409);
     expect(JSON.parse(response.body).error).toMatch(/no report yet/);
     expect(mocks.s3Send).not.toHaveBeenCalled();
+  });
+
+  it('enforces the org-configured turn limit (default 100) before grounding', async () => {
+    const turns = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `t${i}` }))
+        .concat([{ role: 'user', content: 'q' }]);
+    // Default: 101 turns exceed 100.
+    routeDdb({ run: () => runItem() });
+    let response = await handler(chatEvent({ messages: turns(100) }));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toMatch(/100-turn limit/);
+    expect(mocks.s3Send).not.toHaveBeenCalled();
+    // Configured lower: 5 turns exceed 4.
+    routeDdb({ run: () => runItem(), org: () => ({ Item: { chatMaxTurns: 4 } }) });
+    response = await handler(chatEvent({ messages: turns(4) }));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toMatch(/4-turn limit/);
+    // Configured higher: 101 turns pass when the limit is 200.
+    routeDdb({ run: () => runItem(), org: () => ({ Item: { chatMaxTurns: 200 } }) });
+    mocks.s3Send.mockResolvedValue(s3Body(REPORT));
+    mocks.invokeHarnessText.mockResolvedValueOnce('ok');
+    response = await handler(chatEvent({ messages: turns(100) }));
+    expect(response.statusCode).toBe(200);
   });
 
   it('grounds on the report AND succeeded task outputs, invoking report_chat', async () => {

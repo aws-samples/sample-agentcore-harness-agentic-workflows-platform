@@ -271,6 +271,30 @@ describe('validatePutOrgSettings', () => {
       });
     }
   });
+  it('patches chatMaxTurns independently of the model catalog', () => {
+    // Only chatMaxTurns named → catalog untouched.
+    expect(validatePutOrgSettings({ chatMaxTurns: 150 })).toEqual({
+      ok: true,
+      value: { chatMaxTurns: 150 },
+    });
+    expect(validatePutOrgSettings({ chatMaxTurns: '40' })).toEqual({
+      ok: true,
+      value: { chatMaxTurns: 40 },
+    });
+    expect(validatePutOrgSettings({ chatMaxTurns: null })).toEqual({
+      ok: true,
+      value: { chatMaxTurns: null },
+    });
+    // Both fields in one patch.
+    expect(
+      validatePutOrgSettings({ chatMaxTurns: 20, modelCatalog: [{ modelId: 'm' }] }),
+    ).toEqual({ ok: true, value: { chatMaxTurns: 20, modelCatalog: [{ modelId: 'm' }] } });
+    // Bounds.
+    expect(validatePutOrgSettings({ chatMaxTurns: 0 }).ok).toBe(false);
+    expect(validatePutOrgSettings({ chatMaxTurns: 501 }).ok).toBe(false);
+    expect(validatePutOrgSettings({ chatMaxTurns: 2.5 }).ok).toBe(false);
+    expect(validatePutOrgSettings({ chatMaxTurns: 'lots' }).ok).toBe(false);
+  });
   it('rejects entries without modelId and oversized catalogs', () => {
     expect(validatePutOrgSettings({ modelCatalog: [{ description: 'x' }] }).ok).toBe(false);
     expect(
@@ -330,24 +354,22 @@ describe('validateChatReport', () => {
     ).toBe(false);
     expect(validateChatReport({ messages: [{ role: 'user' }] }).ok).toBe(false);
   });
-  it('caps message length and history depth', () => {
+  it('caps message length and applies only the HARD history ceiling (the org limit is enforced by handlers)', () => {
     expect(
       validateChatReport({
         messages: [{ role: 'user', content: 'x'.repeat(8_001) }],
       }).ok,
     ).toBe(false);
-    const tooMany = Array.from({ length: 21 }, (_, i) => ({
-      role: i % 2 === 0 ? 'user' : 'assistant',
-      content: `t${i}`,
-    }));
-    expect(validateChatReport({ messages: tooMany }).ok).toBe(false);
-    // Exactly at the cap, ending on a user turn (index 19 is odd → assistant,
-    // so build 20 turns that end with user).
-    const atCap = Array.from({ length: 20 }, (_, i) => ({
-      role: i % 2 === 0 ? 'assistant' : 'user',
-      content: `t${i}`,
-    }));
-    expect(validateChatReport({ messages: atCap }).ok).toBe(true);
+    const turns = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        role: i % 2 === 0 ? 'assistant' : 'user',
+        content: `t${i}`,
+      }));
+    // 100 (the default org limit) passes shape validation — the effective
+    // limit is applied later from org settings.
+    expect(validateChatReport({ messages: turns(100) }).ok).toBe(true);
+    expect(validateChatReport({ messages: turns(500) }).ok).toBe(true);
+    expect(validateChatReport({ messages: turns(501) }).ok).toBe(false);
   });
 });
 

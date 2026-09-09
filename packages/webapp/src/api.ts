@@ -52,8 +52,16 @@ export interface AgentConfig {
 
 export interface OrgSettings {
   modelCatalog?: CatalogModelEntry[];
+  /** Report chat conversation limit in turns; absent = platform default (100). */
+  chatMaxTurns?: number;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+/** Tri-state org settings patch: undefined = untouched, null = restore default. */
+export interface OrgSettingsPatch {
+  modelCatalog?: CatalogModelEntry[] | null;
+  chatMaxTurns?: number | null;
 }
 
 export interface SettingsResponse {
@@ -450,10 +458,6 @@ export const api = {
       `/settings/agents/${encodeURIComponent(agentName)}`,
       patch,
     ),
-  putOrgSettings: (modelCatalog: CatalogModelEntry[] | null) =>
-    request<{ modelCatalog: CatalogModelEntry[] | null }>(
-      'PUT',
-      '/settings/org',
-      { modelCatalog },
-    ),
+  putOrgSettings: (patch: OrgSettingsPatch) =>
+    request<OrgSettingsPatch & { verified?: boolean }>('PUT', '/settings/org', patch),
 };

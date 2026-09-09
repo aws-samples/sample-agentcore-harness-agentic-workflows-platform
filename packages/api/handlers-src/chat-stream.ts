@@ -32,6 +32,8 @@ import {
   chatInvocationArgs,
   finalChatPayload,
   loadChatContext,
+  loadChatMaxTurns,
+  turnLimitError,
 } from './lib/report-chat';
 import { validateChatReport } from '../src/validation';
 
@@ -162,8 +164,13 @@ export async function runChatStream(
       'report chat is not enabled for this deployment — add an agent named "report_chat" to the workload',
     );
   }
+  const tableName = requireEnv('TABLE_NAME');
+  const maxTurns = await loadChatMaxTurns(tableName);
+  if (validated.value.messages.length > maxTurns) {
+    return fail(400, turnLimitError(maxTurns));
+  }
   const loaded = await loadChatContext({
-    tableName: requireEnv('TABLE_NAME'),
+    tableName,
     bucketName: requireEnv('BUCKET_NAME'),
     runId: decodeURIComponent(runId),
   });

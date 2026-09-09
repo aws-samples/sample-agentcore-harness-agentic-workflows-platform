@@ -179,6 +179,10 @@ export type AgentConfigRecord = z.infer<typeof AgentConfigRecordSchema>;
  * Organization-wide settings (admin-editable). Absent fields fall back to
  * the deployed defaults (e.g. the MODEL_CATALOG environment).
  */
+/** Report chat conversation-length bounds (turns = user + assistant messages). */
+export const CHAT_MAX_TURNS_DEFAULT = 100;
+export const CHAT_MAX_TURNS_LIMIT = 500;
+
 export const OrgSettingsRecordSchema = z.object({
   /** Replaces the deployed model catalog for planner model assignment. */
   modelCatalog: z
@@ -190,6 +194,12 @@ export const OrgSettingsRecordSchema = z.object({
     )
     .max(16)
     .optional(),
+  /**
+   * Longest conversation the report chat accepts, in turns. Absent = the
+   * platform default (CHAT_MAX_TURNS_DEFAULT). The client re-sends the whole
+   * transcript each turn, so this bounds prompt size and cost.
+   */
+  chatMaxTurns: z.number().int().min(1).max(CHAT_MAX_TURNS_LIMIT).optional(),
   updatedAt: z.string().optional(),
   updatedBy: z.string().optional(),
 });

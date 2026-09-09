@@ -1,6 +1,7 @@
 /**
  * Pure validation helpers for the API (unit-tested).
  */
+import { CHAT_MAX_TURNS_LIMIT } from '@agentic-platform/plan-schema';
 
 /** EventBridge Scheduler expressions: rate(...) or cron(...). */
 const RATE_PATTERN = /^rate\(\d+ (minute|minutes|hour|hours|day|days)\)$/;
@@ -250,7 +251,13 @@ export function validatePutAgentConfig(
  * client sends the whole transcript each call — the endpoint is stateless.
  */
 const CHAT_MESSAGE_MAX = 8_000;
-const CHAT_HISTORY_MAX = 20;
+/**
+ * Shape-level ceiling. The EFFECTIVE limit is the org setting `chatMaxTurns`
+ * (default CHAT_MAX_TURNS_DEFAULT), enforced by the handlers once settings
+ * are loaded; this hard cap just keeps absurd payloads out before any AWS
+ * call.
+ */
+const CHAT_HISTORY_HARD_MAX = CHAT_MAX_TURNS_LIMIT;
 
 export interface ChatMessageInput {
   role: 'user' | 'assistant';
@@ -274,10 +281,10 @@ export function validateChatReport(
   if (!Array.isArray(raw) || raw.length === 0) {
     return { ok: false, error: 'messages must be a non-empty array' };
   }
-  if (raw.length > CHAT_HISTORY_MAX) {
+  if (raw.length > CHAT_HISTORY_HARD_MAX) {
     return {
       ok: false,
-      error: `messages may contain at most ${CHAT_HISTORY_MAX} turns`,
+      error: `messages may contain at most ${CHAT_HISTORY_HARD_MAX} turns`,
     };
   }
   const messages: ChatMessageInput[] = [];
@@ -354,17 +361,46 @@ const MODEL_ID_MAX = 128;
 const MODEL_DESCRIPTION_MAX = 512;
 
 export interface OrgSettingsInput {
-  modelCatalog: Array<{ modelId: string; description?: string }> | null;
+  /** undefined = untouched; null = restore default; array = set. */
+  modelCatalog?: Array<{ modelId: string; description?: string }> | null;
+  /** undefined = untouched; null = restore default; number = set. */
+  chatMaxTurns?: number | null;
 }
 
-/** Admin org settings: model catalog override; null/empty restores default. */
+/**
+ * Admin org settings, tri-state per field. For backwards compatibility a
+ * body that names neither field is treated as "clear the model catalog"
+ * (the original single-field contract); a body naming only `chatMaxTurns`
+ * leaves the catalog untouched.
+ */
 export function validatePutOrgSettings(
   body: unknown,
 ): { ok: true; value: OrgSettingsInput } | { ok: false; error: string } {
   const input = (body ?? {}) as Record<string, unknown>;
+  const value: OrgSettingsInput = {};
+
+  if ('chatMaxTurns' in input) {
+    const raw = input.chatMaxTurns;
+    if (raw === null || raw === undefined || raw === '') {
+      value.chatMaxTurns = null;
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > CHAT_MAX_TURNS_LIMIT) {
+        return {
+          ok: false,
+          error: `chatMaxTurns must be an integer between 1 and ${CHAT_MAX_TURNS_LIMIT}, or null to restore the default`,
+        };
+      }
+      value.chatMaxTurns = parsed;
+    }
+    if (!('modelCatalog' in input)) {
+      return { ok: true, value };
+    }
+  }
+
   const raw = input.modelCatalog;
   if (raw === null || raw === undefined) {
-    return { ok: true, value: { modelCatalog: null } };
+    return { ok: true, value: { ...value, modelCatalog: null } };
   }
   if (!Array.isArray(raw) || raw.length > MODEL_CATALOG_MAX) {
     return {
@@ -373,7 +409,7 @@ export function validatePutOrgSettings(
     };
   }
   if (raw.length === 0) {
-    return { ok: true, value: { modelCatalog: null } };
+    return { ok: true, value: { ...value, modelCatalog: null } };
   }
   const catalog: OrgSettingsInput['modelCatalog'] = [];
   for (const entry of raw as Array<Record<string, unknown>>) {
@@ -395,5 +431,5 @@ export function validatePutOrgSettings(
     }
     catalog.push({ modelId, ...(description ? { description } : {}) });
   }
-  return { ok: true, value: { modelCatalog: catalog } };
+  return { ok: true, value: { ...value, modelCatalog: catalog } };
 }

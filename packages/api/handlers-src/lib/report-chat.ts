@@ -18,6 +18,8 @@ import { randomUUID } from 'node:crypto';
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
+  CHAT_MAX_TURNS_DEFAULT,
+  CHAT_MAX_TURNS_LIMIT,
   REPORT_TASK_ID,
   findReportSection,
   replaceReportSection,
@@ -254,6 +256,27 @@ function inferProposal(content: string, reportMarkdown: string): ParsedAnswer {
     };
   }
   return { content };
+}
+
+// ── Conversation length limit (org setting) ────────────────────────────────
+
+/**
+ * The longest transcript a chat request may carry, from org settings
+ * (Settings → Report chat), defaulting to CHAT_MAX_TURNS_DEFAULT. The client
+ * re-sends the whole conversation each turn, so this bounds prompt size.
+ */
+export async function loadChatMaxTurns(tableName: string): Promise<number> {
+  const record = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.orgSettings() }),
+  );
+  const configured = Number(record.Item?.chatMaxTurns);
+  return Number.isInteger(configured) && configured >= 1 && configured <= CHAT_MAX_TURNS_LIMIT
+    ? configured
+    : CHAT_MAX_TURNS_DEFAULT;
+}
+
+export function turnLimitError(limit: number): string {
+  return `this conversation has reached the ${limit}-turn limit — clear it to keep asking (an admin can raise the limit in Settings)`;
 }
 
 // ── Shared grounding core (router sync route + streaming Function URL) ─────
