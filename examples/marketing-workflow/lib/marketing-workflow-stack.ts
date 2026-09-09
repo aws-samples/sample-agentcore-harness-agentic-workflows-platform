@@ -292,13 +292,39 @@ export class MarketingWorkflowStack extends Stack {
           cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
       },
       defaultRootObject: 'index.html',
-      // SPA rewrite is safe globally here: the API is a separate origin, so
-      // backend errors never pass through this distribution (serving the SPA
-      // and the API from one distribution would rewrite API errors to 200s).
+      // SPA rewrite: the JSON API is a separate origin, so backend errors
+      // never pass through this distribution. The /chat/* behavior below IS
+      // a backend on this distribution, but its error statuses (401/404/409)
+      // are not in this list, so they reach the SPA intact — keep it so.
       errorResponses: [
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
       ],
+      // Streaming chat (D-30): the AWS_IAM Function URL behind Origin Access
+      // Control — CloudFront SigV4-signs every origin request, so the URL is
+      // never public (NONE-auth URLs are stripped by account guardrails,
+      // live finding), and the SPA calls it same-origin at /chat/*, so no
+      // CORS. Caching off; forward everything but Host (the origin must see
+      // its own hostname for SigV4). readTimeout bounds the wait for the
+      // FIRST byte only — the handler sends an SSE comment immediately and
+      // keepalives while the model thinks, so long answers stream fine.
+      ...(api.chatStreamFunctionUrl
+        ? {
+            additionalBehaviors: {
+              '/chat/*': {
+                origin: origins.FunctionUrlOrigin.withOriginAccessControl(
+                  api.chatStreamFunctionUrl,
+                  { readTimeout: Duration.seconds(60) },
+                ),
+                allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+                cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+                originRequestPolicy:
+                  cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+              },
+            },
+          }
+        : {}),
     });
     new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
       destinationBucket: siteBucket,
@@ -309,9 +335,10 @@ export class MarketingWorkflowStack extends Stack {
           apiUrl: api.httpApi.apiEndpoint,
           region: this.region,
           userPoolClientId: api.userPoolClient.userPoolClientId,
-          // Streaming chat endpoint (D-30); the SPA falls back to the
-          // buffered API route when absent.
-          ...(api.chatStreamUrl ? { chatStreamUrl: api.chatStreamUrl } : {}),
+          // Streaming chat (D-30): same-origin path on this distribution
+          // (the /chat/* behavior above). The SPA falls back to the buffered
+          // API route when absent.
+          ...(api.chatStreamFunctionUrl ? { chatStreamUrl: '/chat' } : {}),
         }),
       ],
     });

@@ -108,24 +108,20 @@ describe('AgenticApi', () => {
     expect(JSON.stringify(router)).toContain('REPORT_CHAT_HARNESS_ARN');
   });
 
-  it('provisions a response-streaming Function URL for chat with a read-only, single-harness grant (D-30)', () => {
+  it('provisions an IAM-auth response-streaming Function URL for chat with a read-only, single-harness grant (D-30)', () => {
     const { template, api } = synth();
     expect(api.chatStreamUrl).toBeDefined();
+    expect(api.chatStreamFunctionUrl).toBeDefined();
     template.resourceCountIs('AWS::Lambda::Url', 1);
     template.hasResourceProperties('AWS::Lambda::Url', {
-      AuthType: 'NONE',
+      AuthType: 'AWS_IAM',
       InvokeMode: 'RESPONSE_STREAM',
-      Cors: Match.objectLike({
-        AllowMethods: ['POST'],
-        AllowHeaders: ['authorization', 'content-type'],
-      }),
     });
-    // The public-invoke permission Lambda needs for a NONE-auth URL.
-    template.hasResourceProperties('AWS::Lambda::Permission', {
-      Action: 'lambda:InvokeFunctionUrl',
-      Principal: '*',
-      FunctionUrlAuthType: 'NONE',
-    });
+    // Never public: no NONE-auth URL and no anonymous invoke permission
+    // (account guardrails strip those anyway — live finding, D-30).
+    const permissions = JSON.stringify(template.findResources('AWS::Lambda::Permission'));
+    expect(permissions).not.toContain('"FunctionUrlAuthType":"NONE"');
+    expect(permissions).not.toContain('lambda:InvokeFunctionUrl');
     const functions = template.findResources('AWS::Lambda::Function');
     const streamFn = Object.values(functions).find((fn) =>
       JSON.stringify(fn).includes('streaming report chat'),
@@ -135,7 +131,6 @@ describe('AgenticApi', () => {
     // In-handler JWT verification needs the pool + client; no write targets.
     expect(Object.keys(env).sort()).toEqual([
       'BUCKET_NAME',
-      'CORS_ORIGIN',
       'REPORT_CHAT_HARNESS_ARN',
       'TABLE_NAME',
       'USER_POOL_CLIENT_ID',

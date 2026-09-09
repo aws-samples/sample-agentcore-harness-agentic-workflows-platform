@@ -141,6 +141,25 @@ describe('runChatStream — auth and pre-stream failures (plain JSON)', () => {
     warn.mockRestore();
   });
 
+  it('accepts the CloudFront behavior prefix on the path', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    const invoke = vi.fn().mockReturnValue(deltas('ok'));
+    await runChatStream(event(question, { rawPath: `/chat/runs/${RUN_ID}/chat` }), sink, {
+      verifier: okVerifier,
+      invoke,
+    });
+    expect(sink.status).toBe(200);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    // …but not arbitrary depth.
+    const deep = new FakeSink();
+    await runChatStream(event(question, { rawPath: `/a/b/runs/${RUN_ID}/chat` }), deep, {
+      verifier: okVerifier,
+      invoke: vi.fn(),
+    });
+    expect(deep.status).toBe(404);
+  });
+
   it('answers CORS preflight with 204 and no auth', async () => {
     const sink = new FakeSink();
     await runChatStream(
@@ -190,6 +209,11 @@ describe('runChatStream — event stream', () => {
 
     expect(sink.status).toBe(200);
     expect(sink.headers?.['content-type']).toBe('text/event-stream');
+    // Prelude flushed immediately so CloudFront sees bytes before the model
+    // produces its first token (origin read timeout counts idle time).
+    expect(sink.chunks[0]).toBe(': connected\n\n');
+    // Same-origin by default: no CORS headers unless configured.
+    expect(sink.headers?.['access-control-allow-origin']).toBeUndefined();
     const events = sink.events();
     const text = events.filter((e) => e.type === 'delta').map((e) => e.text).join('');
     expect(text).toBe('Revenue grew 12%.');
@@ -231,6 +255,31 @@ describe('runChatStream — event stream', () => {
       newMarkdown: '## Executive summary\n\nUp 12% YoY.',
       rationale: 'basis',
     });
+  });
+
+  it('sends SSE keepalive comments while waiting on the model, then stops', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    async function* slow() {
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      yield 'Finally, an answer that is long enough to pass the gate.';
+    }
+    await runChatStream(event(question), sink, {
+      verifier: okVerifier,
+      invoke: vi.fn().mockReturnValue(slow()),
+      keepaliveMs: 20,
+    });
+    const keepalives = sink.chunks.filter((c) => c === ': keepalive\n\n').length;
+    expect(keepalives).toBeGreaterThanOrEqual(2);
+    // Comments never reach the JSON event parser (only deltas + done).
+    const types = sink.events().map((e) => e.type);
+    expect(new Set(types)).toEqual(new Set(['delta', 'done']));
+    expect(types[types.length - 1]).toBe('done');
+    expect(sink.ended).toBe(true);
+    // Interval cleared: no further writes after end.
+    const after = sink.chunks.length;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(sink.chunks.length).toBe(after);
   });
 
   it('emits an error event (not a 5xx) when the harness fails mid-stream', async () => {

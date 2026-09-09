@@ -184,6 +184,12 @@ async function request<T>(
   return payload as T;
 }
 
+/** Lowercase hex SHA-256 of a string (the SigV4 payload-hash format). */
+export async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export interface ChatReply {
   message: ChatMessage;
   reportVersion: number;
@@ -219,7 +225,10 @@ export async function chatAboutReportStream(
     window.location.assign('/login');
     throw new ApiError(401, 'not signed in');
   }
-  const base = config.chatStreamUrl.replace(/\/$/, '');
+  // Relative ('/chat') = same-origin behavior on the SPA's CloudFront
+  // distribution (the deployed default); absolute = a direct URL.
+  const base = new URL(config.chatStreamUrl, window.location.origin).toString().replace(/\/$/, '');
+  const body = JSON.stringify({ messages: wire });
   let response: Response;
   try {
     response = await fetch(`${base}/runs/${encodeURIComponent(runId)}/chat`, {
@@ -227,9 +236,12 @@ export async function chatAboutReportStream(
       headers: {
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
-        accept: 'text/event-stream',
+        // CloudFront Origin Access Control signs origin requests with
+        // SigV4; for bodied requests it needs the payload hash from the
+        // viewer. Without it the origin rejects the signature.
+        'x-amz-content-sha256': await sha256Hex(body),
       },
-      body: JSON.stringify({ messages: wire }),
+      body,
       signal,
     });
   } catch (e) {

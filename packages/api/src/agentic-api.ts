@@ -78,10 +78,14 @@ export class AgenticApi extends Construct {
   /** Streaming report chat (present only when a report_chat agent exists). */
   public readonly chatStreamFunction?: lambda.Function;
   /**
-   * Response-streaming Function URL for POST /runs/{runId}/chat. The web app
-   * prefers it over the buffered router route (D-30). Undefined without a
-   * report_chat agent.
+   * The AWS_IAM response-streaming Function URL for POST /runs/{runId}/chat.
+   * Front it with CloudFront + Origin Access Control
+   * (`origins.FunctionUrlOrigin.withOriginAccessControl(...)`) so browsers
+   * can reach it; the SPA then calls it same-origin (D-30). Undefined
+   * without a report_chat agent.
    */
+  public readonly chatStreamFunctionUrl?: lambda.FunctionUrl;
+  /** The raw URL of chatStreamFunctionUrl, for IAM-signing callers. */
   public readonly chatStreamUrl?: string;
 
   constructor(scope: Construct, id: string, props: AgenticApiProps) {
@@ -218,12 +222,18 @@ export class AgenticApi extends Construct {
     // API Gateway HTTP API buffers Lambda responses and caps integrations at
     // 29s; a section-edit proposal regularly needs 20–30s (live 500). A
     // Lambda Function URL with RESPONSE_STREAM lifts the cap and streams
-    // tokens. Function URLs only offer AWS_IAM or NONE auth and the SPA has
-    // Cognito id tokens, so the URL is NONE and the handler verifies the JWT
-    // itself (aws-jwt-verify against this pool + client) before any AWS
-    // call — a deliberate second trust boundary, documented in decisions.md.
+    // tokens.
+    //
+    // Auth is layered. The URL itself is AWS_IAM: it is meant to sit behind
+    // a CloudFront distribution with Origin Access Control, which SigV4-signs
+    // every origin request (see examples/marketing-workflow deployWebapp —
+    // the SPA calls it same-origin at /chat/*). A NONE-auth URL was the first
+    // cut and was live-rejected: account guardrails strip the public
+    // InvokeFunctionUrl permission within minutes (D-30). Independently of
+    // IAM, the handler verifies the caller's Cognito id token (aws-jwt-verify
+    // against this pool + client) before any AWS call, so CloudFront reaching
+    // the function never means an anonymous browser can.
     if (reportChat) {
-      const corsOrigins = props.corsOrigins ?? ['*'];
       this.chatStreamFunction = new lambda.Function(this, 'ChatStreamFn', {
         runtime: lambda.Runtime.NODEJS_22_X,
         handler: 'index.handler',
@@ -237,9 +247,6 @@ export class AgenticApi extends Construct {
           REPORT_CHAT_HARNESS_ARN: reportChat.harnessArn,
           USER_POOL_ID: this.userPool.userPoolId,
           USER_POOL_CLIENT_ID: this.userPoolClient.userPoolClientId,
-          // Single-origin deployments echo it; '*' otherwise (URL-level CORS
-          // below is the authoritative allowlist).
-          CORS_ORIGIN: corsOrigins.length === 1 ? corsOrigins[0]! : '*',
         },
         description: 'Agentic API: streaming report chat (Function URL, SSE)',
         tracing: lambda.Tracing.ACTIVE,
@@ -250,18 +257,14 @@ export class AgenticApi extends Construct {
       foundation.table.grantReadData(this.chatStreamFunction);
       foundation.artifactsBucket.grantRead(this.chatStreamFunction);
       reportChat.grantInvoke(this.chatStreamFunction);
-      const url = this.chatStreamFunction.addFunctionUrl({
-        authType: lambda.FunctionUrlAuthType.NONE,
+      // No CORS block: the intended caller is CloudFront (same-origin for
+      // the SPA), and a direct IAM caller doesn't need it either.
+      this.chatStreamFunctionUrl = this.chatStreamFunction.addFunctionUrl({
+        authType: lambda.FunctionUrlAuthType.AWS_IAM,
         invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
-        cors: {
-          allowedOrigins: corsOrigins,
-          allowedMethods: [lambda.HttpMethod.POST],
-          allowedHeaders: ['authorization', 'content-type'],
-          maxAge: Duration.hours(1),
-        },
       });
-      this.chatStreamUrl = url.url;
-      new CfnOutput(this, 'ChatStreamUrl', { value: url.url });
+      this.chatStreamUrl = this.chatStreamFunctionUrl.url;
+      new CfnOutput(this, 'ChatStreamUrl', { value: this.chatStreamUrl });
     }
 
     // ── HTTP API ────────────────────────────────────────────────

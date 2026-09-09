@@ -5,11 +5,13 @@
  * proposal regularly lands in the 20–30s band (D-30). A streaming Function
  * URL lifts the cap and lets the user watch the answer arrive.
  *
- * Trust boundary: Function URLs authorize with AWS_IAM or NONE. The SPA has
- * a Cognito id token, not SigV4 credentials, so the URL is NONE and THIS
- * handler verifies the JWT (signature, issuer, audience, expiry, token_use)
- * before touching any AWS resource — the same claims the JWT authorizer
- * hands the router. Unauthenticated calls get a 401 and nothing else.
+ * Trust boundary, two layers. The Function URL is AWS_IAM and sits behind
+ * CloudFront with Origin Access Control, which SigV4-signs origin requests
+ * (a NONE-auth URL was live-rejected: account guardrails strip the public
+ * permission). Independently, THIS handler verifies the caller's Cognito id
+ * token (signature, issuer, audience, expiry, token_use) before touching
+ * any AWS resource — the same claims the JWT authorizer hands the router.
+ * Unauthenticated calls get a 401 and nothing else.
  *
  * Wire format (text/event-stream), one `data:` JSON line per event:
  *   {"type":"delta","text":"..."}          visible answer text as it arrives
@@ -83,7 +85,10 @@ export async function runChatStream(
   deps: {
     verifier: JwtVerifier;
     invoke: typeof invokeHarnessStream;
+    /** Emit CORS headers for this origin (unset = same-origin via CloudFront). */
     corsOrigin?: string;
+    /** SSE keepalive interval while waiting on the model. Default 10s. */
+    keepaliveMs?: number;
   },
 ): Promise<void> {
   const baseHeaders: Record<string, string> = {
@@ -127,7 +132,9 @@ export async function runChatStream(
     return fail(401, 'invalid or expired token');
   }
 
-  const runId = /^\/runs\/([^/]+)\/chat\/?$/.exec(event.rawPath)?.[1];
+  // Direct: /runs/{runId}/chat. Behind CloudFront the behavior path prefix
+  // (e.g. /chat) is forwarded as-is, so allow one leading segment.
+  const runId = /^(?:\/[^/]+)?\/runs\/([^/]+)\/chat\/?$/.exec(event.rawPath)?.[1];
   if (!runId) {
     return fail(404, `no route: POST ${event.rawPath}`);
   }
@@ -153,6 +160,15 @@ export async function runChatStream(
 
   // ── From here on the response is a 200 event stream.
   sink.start(200, { ...baseHeaders, 'content-type': 'text/event-stream' });
+  // Flush the prelude immediately and keep the connection warm: CloudFront's
+  // origin read timeout counts idle time between bytes, and the model can
+  // think for 20s+ before its first token. SSE comments are ignored by the
+  // client parser.
+  sink.write(': connected\n\n');
+  const keepalive = setInterval(
+    () => sink.write(': keepalive\n\n'),
+    deps.keepaliveMs ?? 10_000,
+  );
   const gate = new ProposalGate();
   try {
     for await (const delta of deps.invoke(
@@ -178,6 +194,7 @@ export async function runChatStream(
       }),
     );
   } finally {
+    clearInterval(keepalive);
     sink.end();
   }
 }
@@ -208,7 +225,9 @@ const streamHandler = async (
   await runChatStream(event, lambdaSink(responseStream), {
     verifier: defaultVerifier(),
     invoke: invokeHarnessStream,
-    corsOrigin: process.env.CORS_ORIGIN ?? '*',
+    // Same-origin behind CloudFront by default; set CORS_ORIGIN only for a
+    // cross-origin deployment.
+    ...(process.env.CORS_ORIGIN ? { corsOrigin: process.env.CORS_ORIGIN } : {}),
   });
 };
 

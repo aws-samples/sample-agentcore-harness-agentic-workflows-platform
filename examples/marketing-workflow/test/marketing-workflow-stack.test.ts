@@ -52,6 +52,38 @@ describe('MarketingWorkflowStack', () => {
     expect(workerMap).not.toContain('"planner"');
   });
 
+  it('fronts the IAM streaming chat URL with CloudFront OAC as a same-origin /chat/* behavior (D-30)', () => {
+    const app = new App();
+    const stack = new MarketingWorkflowStack(app, 'WithWebapp', {
+      defaultModelId: MODEL_ID,
+      removalPolicy: RemovalPolicy.DESTROY,
+      // deployWebapp defaults to true; only takes effect when the SPA dist
+      // exists, so guard the assertions on that.
+      env: { account: '123456789012', region: 'ap-southeast-2' },
+    });
+    const template = Template.fromStack(stack);
+    const distributions = template.findResources('AWS::CloudFront::Distribution');
+    if (Object.keys(distributions).length === 0) {
+      return; // webapp not built in this environment — nothing to assert
+    }
+    const dist = JSON.stringify(Object.values(distributions)[0]);
+    expect(dist).toContain('"PathPattern":"/chat/*"');
+    // A Lambda-URL origin with an OAC attached, no caching.
+    template.hasResourceProperties('AWS::CloudFront::OriginAccessControl', {
+      OriginAccessControlConfig: Match.objectLike({
+        OriginAccessControlOriginType: 'lambda',
+        SigningBehavior: 'always',
+        SigningProtocol: 'sigv4',
+      }),
+    });
+    // OAC needs InvokeFunctionUrl for the distribution principal — and
+    // nothing anonymous.
+    const permissions = JSON.stringify(template.findResources('AWS::Lambda::Permission'));
+    expect(permissions).toContain('cloudfront.amazonaws.com');
+    expect(permissions).not.toContain('"FunctionUrlAuthType":"NONE"');
+    template.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'AWS_IAM' });
+  });
+
   it('registers the default tool subset and leaves patent_search unregistered', () => {
     const template = synth();
     const targets = JSON.stringify(
