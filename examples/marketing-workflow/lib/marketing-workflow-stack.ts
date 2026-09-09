@@ -54,6 +54,11 @@ export interface MarketingWorkflowStackProps extends StackProps {
    * Omit to run the planner on defaultModelId.
    */
   readonly plannerModelId?: string;
+  /**
+   * Model for the report_chat harness (grounded Q&A + section edits over a
+   * finished report — a light task). Omit to run it on defaultModelId.
+   */
+  readonly chatModelId?: string;
   /** Default RETAIN; tests/dev pass DESTROY. */
   readonly removalPolicy?: RemovalPolicy;
   /** Deploy the built webapp if its dist exists. Default: true. */
@@ -236,7 +241,9 @@ export class MarketingWorkflowStack extends Stack {
     const agents = manifest.map((agent) =>
       agent.name === 'planner' && props.plannerModelId
         ? { ...agent, modelId: props.plannerModelId }
-        : agent,
+        : agent.name === 'report_chat' && props.chatModelId
+          ? { ...agent, modelId: props.chatModelId }
+          : agent,
     );
     const foundation = new AgenticFoundation(this, 'Workload', {
       workloadName: 'marketing-workflow',

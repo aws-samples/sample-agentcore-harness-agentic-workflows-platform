@@ -18,6 +18,7 @@ export type RouteKey =
   | 'getRun'
   | 'getArtifactUrl'
   | 'chatAboutReport'
+  | 'putReport'
   | 'getSettings'
   | 'putAgentConfig'
   | 'putOrgSettings';
@@ -70,6 +71,8 @@ const ROUTES: RouteSpec[] = [
     method: 'POST',
     segments: ['runs', ':runId', 'chat'],
   },
+  // Save an edited report as a new version (owner-or-admin in the handler).
+  { key: 'putReport', method: 'PUT', segments: ['runs', ':runId', 'report'] },
   // Runtime configuration (D-19): readable by all signed-in users; PUTs are
   // admin-gated in the handler.
   { key: 'getSettings', method: 'GET', segments: ['settings'] },

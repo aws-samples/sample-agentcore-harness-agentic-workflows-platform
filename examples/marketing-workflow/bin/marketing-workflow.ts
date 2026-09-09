@@ -78,6 +78,9 @@ new MarketingWorkflowStack(app, 'MarketingWorkflow', {
   // Plan quality drives every downstream task: run the planner on the
   // deep-tier model whenever one is provided.
   ...(deepModelId ? { plannerModelId: deepModelId } : {}),
+  // Report chat is a light grounded-answer task: run it on the fast tier
+  // whenever one is provided.
+  ...(fastModelId ? { chatModelId: fastModelId } : {}),
   // Optional: -c alarmEmail=<address> subscribes to the workload alarms.
   ...((app.node.tryGetContext('alarmEmail') as string | undefined)
     ? { alarmEmail: app.node.tryGetContext('alarmEmail') as string }

@@ -21,6 +21,8 @@ export { MemoryJanitor, type MemoryJanitorProps } from './memory-janitor';
 export { ObservabilityPack, type ObservabilityPackProps } from './observability';
 export {
   AgenticFoundation,
+  PLANNER_AGENT_NAME,
+  REPORT_CHAT_AGENT_NAME,
   type AgenticFoundationProps,
 } from './agentic-foundation';
 export {

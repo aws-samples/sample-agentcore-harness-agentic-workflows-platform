@@ -13,7 +13,7 @@
  */
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
-import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -31,6 +31,14 @@ export interface AgenticApiProps {
    * 'planner'. Required — the goal→plan flow is the API's core capability.
    */
   readonly planner?: HarnessAgent;
+  /**
+   * Harness serving POST /runs/{runId}/chat (grounded Q&A + section edits
+   * over a finished report). Default: the foundation's reserved
+   * `report_chat` agent. When neither exists, the chat route is disabled
+   * (503) — the report worker is deliberately NOT reused: it carries a
+   * heavyweight brief-writing prompt, model, and token cap.
+   */
+  readonly reportChat?: HarnessAgent;
   /** CORS origins for the SPA. Default: ['*'] (tighten per deployment). */
   readonly corsOrigins?: string[];
   /** Default: DESTROY — the pool holds demo users, not business data. */
@@ -76,6 +84,12 @@ export class AgenticApi extends Construct {
     if (!planner) {
       throw new Error(
         'AgenticApi requires a planner harness: add an agent named "planner" to the foundation or pass props.planner',
+      );
+    }
+    const reportChat = props.reportChat ?? foundation.reportChat;
+    if (!reportChat) {
+      Annotations.of(this).addWarning(
+        'AgenticApi: no "report_chat" agent declared — the report chat route (POST /runs/{runId}/chat) will respond 503. Add an agent named "report_chat" to the workload to enable it.',
       );
     }
 
@@ -154,6 +168,9 @@ export class AgenticApi extends Construct {
         WORKER_HARNESS_MAP: workerMapJson,
         ...modelCatalogEnv,
         PLANNER_JOB_FUNCTION_NAME: this.plannerJobFunction.functionName,
+        ...(reportChat
+          ? { REPORT_CHAT_HARNESS_ARN: reportChat.harnessArn }
+          : {}),
         ...foundation.scheduler.runtimeEnvironment(),
       },
       description: 'Agentic API: workflow/schedule/run/artifact routes',
@@ -163,24 +180,15 @@ export class AgenticApi extends Construct {
       logRetention: logs.RetentionDays.THREE_MONTHS,
     });
     foundation.table.grantReadWriteData(this.routerFunction);
-    foundation.artifactsBucket.grantRead(this.routerFunction);
+    // Read: presigned artifact URLs + chat grounding. Write: report edits
+    // save new versions as artifacts/<wf>/<run>/report.v<n>.md (the handler
+    // enforces the prefix; the original report.md is never overwritten).
+    foundation.artifactsBucket.grantReadWrite(this.routerFunction);
     foundation.workflow.grantStartExecution(this.routerFunction);
-    // Report chat (POST /runs/{runId}/chat): the router synchronously invokes
-    // the run's report worker harness to answer questions grounded in the
-    // report. Grant InvokeHarness/InvokeAgentRuntime on every registered
-    // worker harness (and its endpoints) — the report worker varies per plan,
-    // and this mirrors the interpreter's own worker-invoke grant (D-12).
-    const workerHarnessArns = Object.values(foundation.workflow.workerArns);
-    if (workerHarnessArns.length > 0) {
-      this.routerFunction.addToRolePolicy(
-        new iam.PolicyStatement({
-          actions: [
-            'bedrock-agentcore:InvokeHarness',
-            'bedrock-agentcore:InvokeAgentRuntime',
-          ],
-          resources: workerHarnessArns.flatMap((arn) => [arn, `${arn}/*`]),
-        }),
-      );
+    // Report chat (POST /runs/{runId}/chat): the router synchronously
+    // invokes ONLY the dedicated report_chat harness (D-12 grant shape).
+    if (reportChat) {
+      reportChat.grantInvoke(this.routerFunction);
     }
     // Zombie-run reconciliation (D-15): read-only on this SM's executions.
     foundation.workflow.stateMachine.grantExecution(

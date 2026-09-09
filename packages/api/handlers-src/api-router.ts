@@ -12,7 +12,7 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   DescribeExecutionCommand,
@@ -31,15 +31,27 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { randomUUID } from 'node:crypto';
 import {
   LIST_INDEX_NAME,
+  REPORT_TASK_ID,
+  artifactKeys,
   parsePlanDocument,
   tableKeys,
   validatePlanAgainstCatalog,
+  type ReportVersion,
 } from '@agentic-platform/plan-schema';
 import {
+  loadAgentConfig,
   loadDeployedWorkerCatalog,
   loadEffectiveModelCatalog,
+  resolveModelInvocation,
 } from '@agentic-platform/constructs/dist/handlers-src/lib/runtime-config';
 import { invokeHarnessText } from '@agentic-platform/constructs/dist/handlers-src/lib/planner-client';
+import {
+  CHAT_SOURCE_MAX_CHARS,
+  REPORT_CHAT_AGENT_NAME,
+  buildChatRequest,
+  parseChatAnswer,
+  type GroundingSource,
+} from './lib/report-chat';
 import { ddb, nowIso, requireEnv } from './lib/common';
 import { checkModelIds } from './lib/model-catalog-check';
 import {
@@ -61,6 +73,7 @@ import {
   validateCreateWorkflow,
   validatePutAgentConfig,
   validatePutOrgSettings,
+  validatePutReport,
   validateUpdateWorkflow,
 } from '../src/validation';
 
@@ -107,6 +120,8 @@ export async function handler(event: HttpEvent): Promise<HttpResponse> {
         return await getArtifactUrl(match.params.runId!, event);
       case 'chatAboutReport':
         return await chatAboutReport(match.params.runId!, event);
+      case 'putReport':
+        return await putReport(match.params.runId!, event);
       case 'getSettings':
         return await getSettings(event);
       case 'putAgentConfig':
@@ -903,24 +918,19 @@ async function getArtifactUrl(
   return json(200, { url, expiresInSeconds: PRESIGN_TTL_SECONDS });
 }
 
-/** Report grounding budget: cap injected report text so the assembled
- * prompt stays well within the harness context window (report.md can be
- * large; the chat only needs the deliverable, not every source appendix). */
-const CHAT_REPORT_MAX_CHARS = 60_000;
-
 /**
- * Chat over a run's generated report. A report-grounded agent answers the
- * end-user's question using ONLY the run's report as source material.
+ * Chat over a run's report (POST /runs/{runId}/chat). The dedicated
+ * `report_chat` harness answers using ONLY the report and the specialist task
+ * outputs it was built from, both injected into the request; it may also
+ * return one section-scoped edit proposal (see lib/report-chat.ts).
  *
- * The endpoint is synchronous (fits the 29s router budget for a single
- * grounded answer) and stateless: the client sends the full conversation
- * each call, and we reuse one runtime session id per run so the harness
- * also sees the turns as native context. We reuse the run's REPORT worker
- * harness (plan.report.worker) — it already owns the report's tone and
- * domain framing — invoked with a chat-scoped system prompt override so it
- * answers questions instead of re-writing a brief. Reads are open to any
- * signed-in user (shared-workspace model, matching getRun); the model spend
- * per question is a single bounded invocation.
+ * Synchronous (single bounded invocation fits the 29s router budget) and
+ * stateless on the wire: the client sends the whole transcript; one runtime
+ * session per run gives the harness native turn memory too. Admin prompt /
+ * model overrides from Settings apply exactly as they do for workers
+ * (D-19), so the chat prompt is tunable without a deploy. Reads are open to
+ * every signed-in user (shared-workspace model, matching getRun); saving an
+ * edit is a separate owner-or-admin route (putReport).
  */
 async function chatAboutReport(
   runId: string,
@@ -930,7 +940,15 @@ async function chatAboutReport(
   if (!validated.ok) {
     return badRequest(validated.error);
   }
+  const harnessArn = process.env.REPORT_CHAT_HARNESS_ARN;
+  if (!harnessArn) {
+    return json(503, {
+      error:
+        'report chat is not enabled for this deployment — add an agent named "report_chat" to the workload',
+    });
+  }
   const tableName = requireEnv('TABLE_NAME');
+  const bucketName = requireEnv('BUCKET_NAME');
   const run = await ddb.send(
     new GetCommand({ TableName: tableName, Key: tableKeys.run(runId) }),
   );
@@ -947,73 +965,77 @@ async function chatAboutReport(
         'this run has no report yet — a report is available once the run finishes (succeeded or partial)',
     });
   }
+  const versions = reportVersionsOf(run.Item);
+  const currentVersion = versions[versions.length - 1]!.version;
 
-  // Resolve the report worker's harness ARN from the run's plan-of-record;
-  // fall back to any registered worker if the plan can't be read.
-  const workerMap = JSON.parse(requireEnv('WORKER_HARNESS_MAP')) as Record<
-    string,
-    string
-  >;
-  const plan = run.Item.plan as { report?: { worker?: string } } | undefined;
-  const reportWorker = plan?.report?.worker;
-  const harnessArn =
-    (reportWorker && workerMap[reportWorker]) ??
-    Object.values(workerMap)[0];
-  if (!harnessArn) {
-    return json(500, { error: 'no worker harness registered to answer report questions' });
-  }
-
-  // Fetch the report markdown (bounded) as the sole grounding source.
-  let reportText: string;
+  // Grounding: the current report plus every succeeded task's output.
+  let reportMarkdown: string;
+  const sources: GroundingSource[] = [];
   try {
-    const object = await s3.send(
-      new GetObjectCommand({ Bucket: requireEnv('BUCKET_NAME'), Key: reportKey }),
+    reportMarkdown = await readArtifact(bucketName, reportKey);
+    const tasks = await ddb.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: 'pk = :pk AND begins_with(sk, :sk)',
+        ExpressionAttributeValues: { ':pk': `RUN#${runId}`, ':sk': 'TASK#' },
+      }),
     );
-    const body = (await object.Body?.transformToString()) ?? '';
-    reportText =
-      body.length <= CHAT_REPORT_MAX_CHARS
-        ? body
-        : `${body.slice(0, CHAT_REPORT_MAX_CHARS)}\n\n[report truncated at ${CHAT_REPORT_MAX_CHARS} characters]`;
+    const plan = run.Item.plan as
+      | { tasks?: Array<{ id: string; name?: string }> }
+      | undefined;
+    const names = new Map(
+      (plan?.tasks ?? []).map((task) => [task.id, task.name ?? task.id]),
+    );
+    for (const task of tasks.Items ?? []) {
+      const taskId = String(task.taskId ?? '');
+      if (
+        taskId === REPORT_TASK_ID ||
+        task.status !== 'succeeded' ||
+        typeof task.artifactKey !== 'string'
+      ) {
+        continue;
+      }
+      sources.push({
+        taskId,
+        name: names.get(taskId) ?? taskId,
+        text: await readArtifact(bucketName, task.artifactKey, CHAT_SOURCE_MAX_CHARS),
+      });
+    }
   } catch (error) {
-    console.error('chatAboutReport: report fetch failed', { runId, reportKey, error });
-    return json(502, { error: 'could not load the report artifact for this run' });
+    console.error('chatAboutReport: grounding fetch failed', { runId, error });
+    return json(502, { error: 'could not load the report artifacts for this run' });
   }
 
-  const messages = validated.value.messages;
-  const question = messages[messages.length - 1]!.content;
-  // Prior turns become transcript context; the latest user turn is the
-  // question. (We also reuse a stable runtime session per run, so the
-  // harness retains its own memory across questions.)
-  const priorTurns = messages
-    .slice(0, -1)
-    .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`)
-    .join('\n\n');
-
-  const systemPrompt = [
-    'You are a helpful assistant answering questions about a specific report that was already generated for the user.',
-    'Ground every answer ONLY in the report provided below. Do not invent facts or use outside knowledge.',
-    "If the report does not contain the answer, say so plainly and point to the closest relevant section instead of guessing.",
-    'Be concise and direct. Use Markdown (short paragraphs, bullet lists, or tables) when it aids clarity. Quote figures and section names from the report where helpful.',
-    '',
-    '# Report',
-    reportText,
-  ].join('\n');
-
-  const userMessage = priorTurns
-    ? `# Conversation so far\n\n${priorTurns}\n\n# New question\n\n${question}`
-    : question;
+  // Same override resolution as the interpreter applies to workers (D-19).
+  const agentConfig = await loadAgentConfig(tableName, REPORT_CHAT_AGENT_NAME);
+  const model = resolveModelInvocation(agentConfig);
 
   try {
-    const answer = await invokeHarnessText({
+    const raw = await invokeHarnessText({
       harnessArn,
-      // Runtime session ids must be ≥33 chars; a run-scoped, chat-namespaced
-      // id keeps every question for a run in the same harness session.
+      // Runtime session ids must be ≥33 chars; one session per run keeps
+      // every question about that run in the same harness conversation.
       sessionId: `chat-${runId}-report-session`.padEnd(33, '0'),
-      text: userMessage,
-      systemPrompt,
+      text: buildChatRequest({
+        reportMarkdown,
+        reportVersion: currentVersion,
+        sources,
+        messages: validated.value.messages,
+      }),
+      ...(agentConfig?.instructionsOverride
+        ? { systemPrompt: agentConfig.instructionsOverride }
+        : {}),
+      ...(model ? { model } : {}),
     });
+    const parsed = parseChatAnswer(raw, reportMarkdown);
     return json(200, {
-      message: { role: 'assistant', content: answer.trim() },
+      message: {
+        role: 'assistant',
+        content: parsed.content,
+        ...(parsed.proposedEdit ? { proposedEdit: parsed.proposedEdit } : {}),
+        ...(parsed.proposalIssue ? { proposalIssue: parsed.proposalIssue } : {}),
+      },
+      reportVersion: currentVersion,
     });
   } catch (error) {
     console.error('chatAboutReport: harness invocation failed', { runId, error });
@@ -1021,6 +1043,126 @@ async function chatAboutReport(
       error: 'the report assistant could not answer right now — please try again',
     });
   }
+}
+
+/**
+ * Save an edited report as a new version (PUT /runs/{runId}/report).
+ * Owner-or-admin of the run's workflow (mutation, like savePlan). The
+ * original report.md is never overwritten: v2, v3, … are separate objects
+ * under the run's artifact prefix, the run's reportVersions list grows, and
+ * reportArtifactKey moves to the newest. `baseVersion` gives optimistic
+ * concurrency: a stale editor gets a 409 instead of clobbering a newer save.
+ */
+async function putReport(runId: string, event: HttpEvent): Promise<HttpResponse> {
+  const validated = validatePutReport(parseBody(event));
+  if (!validated.ok) {
+    return badRequest(validated.error);
+  }
+  const tableName = requireEnv('TABLE_NAME');
+  const run = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.run(runId) }),
+  );
+  if (!run.Item) {
+    return notFound(`run ${runId}`);
+  }
+  const workflowId = String(run.Item.workflowId ?? '');
+  const meta = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.workflowMeta(workflowId) }),
+  );
+  if (!meta.Item) {
+    return notFound(`workflow ${workflowId}`);
+  }
+  const denied = requireOwnerOrAdmin(event, meta.Item, 'edit this report');
+  if (denied) {
+    return denied;
+  }
+  if (typeof run.Item.reportArtifactKey !== 'string') {
+    return json(409, { error: 'this run has no report to edit yet' });
+  }
+  const versions = reportVersionsOf(run.Item);
+  const latest = versions[versions.length - 1]!;
+  if (validated.value.baseVersion !== latest.version) {
+    return json(409, {
+      error: `report has changed since you started editing (you edited v${validated.value.baseVersion}, latest is v${latest.version}) — reload and reapply your changes`,
+      latestVersion: latest.version,
+    });
+  }
+  const version = latest.version + 1;
+  const artifactKey = artifactKeys.reportVersion(workflowId, runId, version);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: requireEnv('BUCKET_NAME'),
+      Key: artifactKey,
+      Body: validated.value.markdown,
+      ContentType: 'text/markdown; charset=utf-8',
+    }),
+  );
+  const entry: ReportVersion = {
+    version,
+    artifactKey,
+    savedAt: nowIso(),
+    savedBy: callerId(event) ?? 'unknown',
+    ...(validated.value.note ? { note: validated.value.note } : {}),
+  };
+  const updated = await ddb.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: tableKeys.run(runId),
+      UpdateExpression:
+        'SET reportArtifactKey = :key, reportVersions = :versions',
+      // Guard the write too: only advance from the version we read.
+      ConditionExpression: 'reportArtifactKey = :expectedKey',
+      ExpressionAttributeValues: {
+        ':key': artifactKey,
+        ':versions': [...versions, entry],
+        ':expectedKey': latest.artifactKey,
+      },
+      ReturnValues: 'ALL_NEW',
+    }),
+  ).catch((error: unknown) => {
+    if ((error as { name?: string }).name === 'ConditionalCheckFailedException') {
+      return undefined;
+    }
+    throw error;
+  });
+  if (!updated) {
+    return json(409, {
+      error: 'report changed concurrently — reload and reapply your changes',
+    });
+  }
+  return json(200, {
+    version: entry,
+    reportArtifactKey: artifactKey,
+    reportVersions: [...versions, entry],
+  });
+}
+
+/**
+ * A run's report version list. Runs created before editing existed have no
+ * list; synthesize v1 from reportArtifactKey so callers always see ≥1 entry.
+ */
+function reportVersionsOf(run: Record<string, unknown>): ReportVersion[] {
+  const stored = run.reportVersions;
+  if (Array.isArray(stored) && stored.length > 0) {
+    return stored as ReportVersion[];
+  }
+  return [
+    {
+      version: 1,
+      artifactKey: String(run.reportArtifactKey ?? ''),
+      savedAt: String(run.finishedAt ?? run.startedAt ?? ''),
+    },
+  ];
+}
+
+async function readArtifact(
+  bucket: string,
+  key: string,
+  maxChars?: number,
+): Promise<string> {
+  const object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const body = (await object.Body?.transformToString()) ?? '';
+  return maxChars === undefined ? body : body.slice(0, maxChars);
 }
 
 function publicWorkflow(item: Record<string, unknown>): Record<string, unknown> {

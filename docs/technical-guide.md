@@ -56,7 +56,7 @@ The platform is written once; each workload is stamped out from it via configura
 | Concern | What the workload provides |
 |---|---|
 | Stack composition | A `Stack` wiring the platform constructs together (e.g. `MarketingWorkflowStack`) |
-| Agent roster | `workload.yaml` (or TS configs): instructions, tools, memory, limits, thinking effort per agent. One agent named `planner` is auto-wired as the planning harness |
+| Agent roster | `workload.yaml` (or TS configs): instructions, tools, memory, limits, thinking effort per agent. Two names are reserved and never become workers: `planner` (the planning harness) and `report_chat` (grounded Q&A + section edits over a finished report, served by `POST /runs/{runId}/chat`) |
 | Gateway + tool selection | Its own `agentcore.Gateway`, which catalog targets to attach, secret names, per-Lambda memory |
 | Secret prefix | Namespace like `marketing-workflow/` — drives IAM scoping for that workload's tool Lambdas |
 | Model choices | `defaultModelId`, optional planner model (`plannerModelId`), optional `modelCatalog` for per-task assignment |
@@ -143,7 +143,11 @@ new AgenticFoundation(this, 'CompetitorSnapshot', {
 });
 ```
 
-That one construct provisions the KMS key, DynamoDB table, artifact bucket, harness agents, plan-interpreter state machine, scheduler, observability pack, and runtime-config seeds — all cost-tagged. An agent named `planner` is automatically wired as the planning harness; everything else becomes a worker the planner can assign tasks to.
+That one construct provisions the KMS key, DynamoDB table, artifact bucket, harness agents, plan-interpreter state machine, scheduler, observability pack, and runtime-config seeds — all cost-tagged. An agent named `planner` is automatically wired as the planning harness and one named `report_chat` as the report assistant (exposed as `foundation.reportChat`, invoked only by the API); everything else becomes a worker the planner can assign tasks to. Omit `report_chat` and the chat route answers 503 — the report worker is deliberately not reused for chat.
+
+### Report chat and edits
+
+`POST /runs/{runId}/chat` grounds the `report_chat` harness on the run's current report plus every succeeded task's output (character-budgeted), applies the same admin prompt/model overrides as workers, and returns the answer. When the user asks for a change, the agent replies with one **section-scoped** proposal (an existing heading plus the full replacement for that section) that the API validates against the current report. The web app shows current vs proposed side by side; the workflow owner or an admin can apply it to the editor or save it directly. Saves go through `PUT /runs/{runId}/report`: the generated `report.md` is never overwritten — each save writes `report.v<n>.md`, appends to the run's `reportVersions`, moves `reportArtifactKey` to the newest, and rejects stale `baseVersion`s with a 409.
 
 `second-workload` deliberately uses inline TypeScript agent configs to show the typed alternative to `workload.yaml` — both surfaces validate against the same zod schema.
 

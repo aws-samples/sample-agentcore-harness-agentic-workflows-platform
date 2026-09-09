@@ -19,9 +19,9 @@ function synth(): Template {
 describe('MarketingWorkflowStack', () => {
   it('provisions the full marketing-workflow workload from configuration alone', () => {
     const template = synth();
-    // 9 agents: planner + product_expert + 5 marketing workers + strategist
-    // + report generator.
-    template.resourceCountIs('AWS::BedrockAgentCore::Harness', 9);
+    // 10 agents: planner + product_expert + 5 marketing workers + strategist
+    // + report generator + report_chat (API-only, not a worker).
+    template.resourceCountIs('AWS::BedrockAgentCore::Harness', 10);
     template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
     // Independent tool targets (D-25): Tavily's hosted MCP server + one
     // Lambda target per executor tool (incl. the Python currency_rates).
@@ -32,6 +32,24 @@ describe('MarketingWorkflowStack', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
     template.resourceCountIs('AWS::Cognito::UserPool', 1);
     template.resourceCountIs('AWS::Scheduler::ScheduleGroup', 1);
+  });
+
+  it('keeps report_chat out of the worker map but wires it to the API router', () => {
+    const template = synth();
+    const functions = template.findResources('AWS::Lambda::Function');
+    const router = Object.values(functions).find((fn) =>
+      JSON.stringify(fn).includes('workflow/schedule/run/artifact routes'),
+    );
+    const routerJson = JSON.stringify(router);
+    expect(routerJson).toContain('REPORT_CHAT_HARNESS_ARN');
+    // WORKER_HARNESS_MAP is a JSON string in env; the reserved agents must
+    // not appear as keys in it.
+    const envVars = (router as { Properties: { Environment: { Variables: Record<string, unknown> } } })
+      .Properties.Environment.Variables;
+    const workerMap = JSON.stringify(envVars.WORKER_HARNESS_MAP);
+    expect(workerMap).toContain('report_generator');
+    expect(workerMap).not.toContain('report_chat');
+    expect(workerMap).not.toContain('"planner"');
   });
 
   it('registers the default tool subset and leaves patent_search unregistered', () => {

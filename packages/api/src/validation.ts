@@ -304,6 +304,51 @@ export function validateChatReport(
   return { ok: true, value: { messages } };
 }
 
+/** Report edits: full-document saves, bounded to keep S3 objects sane. */
+const REPORT_MARKDOWN_MAX = 400_000;
+const REPORT_NOTE_MAX = 512;
+
+export interface PutReportInput {
+  /** The complete new report markdown. */
+  markdown: string;
+  /**
+   * The version the client edited from. The save is rejected (409) when the
+   * run has moved past it — optimistic concurrency for concurrent editors.
+   */
+  baseVersion: number;
+  /** Optional change note (e.g. the accepted proposal's rationale). */
+  note?: string;
+}
+
+export function validatePutReport(
+  body: unknown,
+): { ok: true; value: PutReportInput } | { ok: false; error: string } {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const markdown =
+    typeof input.markdown === 'string' ? input.markdown.replace(/\r\n/g, '\n') : '';
+  if (markdown.trim().length === 0) {
+    return { ok: false, error: 'markdown is required' };
+  }
+  if (markdown.length > REPORT_MARKDOWN_MAX) {
+    return {
+      ok: false,
+      error: `markdown exceeds ${REPORT_MARKDOWN_MAX} chars`,
+    };
+  }
+  const baseVersion = Number(input.baseVersion);
+  if (!Number.isInteger(baseVersion) || baseVersion < 1) {
+    return { ok: false, error: 'baseVersion must be a positive integer' };
+  }
+  const note = typeof input.note === 'string' ? input.note.trim() : '';
+  if (note.length > REPORT_NOTE_MAX) {
+    return { ok: false, error: `note exceeds ${REPORT_NOTE_MAX} chars` };
+  }
+  return {
+    ok: true,
+    value: { markdown, baseVersion, ...(note ? { note } : {}) },
+  };
+}
+
 const MODEL_CATALOG_MAX = 16;
 const MODEL_ID_MAX = 128;
 const MODEL_DESCRIPTION_MAX = 512;

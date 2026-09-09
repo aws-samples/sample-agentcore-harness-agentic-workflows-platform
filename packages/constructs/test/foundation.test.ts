@@ -19,6 +19,7 @@ function synth() {
         tools: [{ type: 'agentcore_browser' }],
       },
       { name: 'report_generator', instructions: 'Assemble research briefs.' },
+      { name: 'report_chat', instructions: 'Answer questions about a report.' },
     ],
     maxConcurrency: 3,
     removalPolicy: RemovalPolicy.DESTROY,
@@ -29,7 +30,7 @@ function synth() {
 describe('AgenticFoundation', () => {
   it('provisions the five-layer foundation from configs alone', () => {
     const { template } = synth();
-    template.resourceCountIs('AWS::BedrockAgentCore::Harness', 3);
+    template.resourceCountIs('AWS::BedrockAgentCore::Harness', 4);
     // Interpreter + the memory-janitor provider's waiter state machine.
     template.resourceCountIs('AWS::StepFunctions::StateMachine', 2);
     template.resourceCountIs('AWS::Scheduler::ScheduleGroup', 1);
@@ -104,6 +105,17 @@ describe('AgenticFoundation', () => {
     expect(JSON.stringify(prepareRun)).toContain('PLANNER_HARNESS_ARN');
   });
 
+  it('reserves report_chat: exposed for the API, excluded from the worker catalog', () => {
+    const { foundation } = synth();
+    expect(foundation.reportChat?.harnessName).toBe('report_chat');
+    expect(foundation.workflow.workerArns).not.toHaveProperty('report_chat');
+    expect(
+      foundation.workflow.workerCatalog.map((worker) => worker.name),
+    ).not.toContain('report_chat');
+    // Still a first-class agent: prompt/model seeded and admin-tunable.
+    expect(foundation.agents).toHaveProperty('report_chat');
+  });
+
   it('applies workload cost-attribution tags', () => {
     const { template } = synth();
     template.hasResourceProperties('AWS::DynamoDB::Table', {
@@ -119,7 +131,7 @@ describe('MemoryJanitor wiring', () => {
     const { template } = synth();
     template.resourceCountIs('Custom::AgentCoreMemoryJanitor', 1);
     template.hasResourceProperties('Custom::AgentCoreMemoryJanitor', {
-      AgentNames: ['planner', 'report_generator', 'web_research'],
+      AgentNames: ['planner', 'report_chat', 'report_generator', 'web_research'],
     });
     // Every harness must depend on the janitor so CloudFormation creates
     // it after leftover memories cleared, and deletes it before the

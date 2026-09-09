@@ -77,7 +77,10 @@ export interface RunDetail extends RunSummary {
   replanned?: boolean;
   tokensInputTotal?: number;
   tokensOutputTotal?: number;
+  /** Latest report version's key. */
   reportArtifactKey?: string;
+  /** Edit history (absent until the first user edit; v1 is implied). */
+  reportVersions?: ReportVersion[];
 }
 
 export interface TaskView {
@@ -90,10 +93,35 @@ export interface TaskView {
   finishedAt?: string;
 }
 
+/**
+ * A section-scoped edit the report assistant proposes. `heading` is an
+ * existing heading line in the report; `newMarkdown` is the complete
+ * replacement for that section (starting with its heading). Validated
+ * server-side against the current report, so it always splices.
+ */
+export interface ProposedEdit {
+  heading: string;
+  newMarkdown: string;
+  rationale?: string;
+}
+
 /** A single turn in a report-chat conversation. */
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** Assistant turns only: an applicable edit proposal. */
+  proposedEdit?: ProposedEdit;
+  /** Assistant turns only: why a returned proposal was dropped. */
+  proposalIssue?: string;
+}
+
+/** One saved revision of a run's report (v1 = the generated original). */
+export interface ReportVersion {
+  version: number;
+  artifactKey: string;
+  savedAt: string;
+  savedBy?: string;
+  note?: string;
 }
 
 export interface PlanDraftJob {
@@ -218,9 +246,25 @@ export const api = {
    * Returns the assistant's answer, grounded in the report.
    */
   chatAboutReport: (runId: string, messages: ChatMessage[]) =>
-    request<{ message: ChatMessage }>('POST', `/runs/${runId}/chat`, {
-      messages,
-    }),
+    request<{ message: ChatMessage; reportVersion: number }>(
+      'POST',
+      `/runs/${runId}/chat`,
+      // Only role/content travel; proposals are server-derived.
+      { messages: messages.map(({ role, content }) => ({ role, content })) },
+    ),
+  /**
+   * Save an edited report as a new version (owner or admin). `baseVersion`
+   * is the version the user edited from; a 409 means it moved on.
+   */
+  putReport: (
+    runId: string,
+    input: { markdown: string; baseVersion: number; note?: string },
+  ) =>
+    request<{
+      version: ReportVersion;
+      reportArtifactKey: string;
+      reportVersions: ReportVersion[];
+    }>('PUT', `/runs/${runId}/report`, input),
   // Runtime configuration (D-19): prompts + org settings.
   getSettings: () => request<SettingsResponse>('GET', '/settings'),
   putAgentConfig: (

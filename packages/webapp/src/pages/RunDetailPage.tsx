@@ -4,7 +4,7 @@
  * and an inline artifact viewer with markdown rendering and .md download.
  * Polls every 5s while running.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
@@ -14,13 +14,14 @@ import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import ProgressBar from '@cloudscape-design/components/progress-bar';
-import PromptInput from '@cloudscape-design/components/prompt-input';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
-import { api, ApiError, type ChatMessage, type RunDetail, type TaskView } from '../api';
+import { api, type RunDetail, type TaskView } from '../api';
+import { isAdminUser, tokenClaims } from '../auth';
 import Markdown from '../components/Markdown';
+import ReportWorkspace from '../components/ReportWorkspace';
 import { RunStatus, TaskStatus } from '../components/status';
 import { durationBetween, formatCount, formatDateTime } from '../format';
 import { useRecordVisit } from '../recents';
@@ -39,8 +40,10 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [workflowName, setWorkflowName] = useState<string | null>(null);
+  const [workflowOwner, setWorkflowOwner] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [artifact, setArtifact] = useState<ArtifactState | null>(null);
+  const reportRef = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async () => {
     const result = await api.getRun(runId);
@@ -80,7 +83,10 @@ export default function RunDetailPage() {
     api
       .getWorkflow(run.workflowId)
       .then((result) => {
-        if (!cancelled) setWorkflowName(result.workflow.name);
+        if (!cancelled) {
+          setWorkflowName(result.workflow.name);
+          setWorkflowOwner(result.workflow.createdBy);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -155,7 +161,19 @@ export default function RunDetailPage() {
   const workers = tasks.filter((task) => task.taskId !== '__report');
   const report = tasks.find((task) => task.taskId === '__report');
   const orderedTasks = report ? [...workers, report] : workers;
-  const reportKey = report?.artifactKey ?? run.reportArtifactKey;
+  // The run record's key tracks the LATEST version (user edits move it);
+  // the report task record only ever knows the generated original.
+  const reportKey = run.reportArtifactKey ?? report?.artifactKey;
+  // Owner-or-admin mirrors the API's rule for saving report edits (UX
+  // gating only — the server enforces it).
+  const claims = tokenClaims();
+  const me = claims?.['cognito:username'] ?? claims?.sub;
+  const canEdit =
+    isAdminUser() || (typeof me === 'string' && !!workflowOwner && me === workflowOwner);
+
+  function showReport() {
+    reportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   const finished = tasks.filter((task) =>
     ['succeeded', 'failed', 'skipped'].includes(task.status),
@@ -186,7 +204,7 @@ export default function RunDetailPage() {
                 variant="primary"
                 disabled={!reportKey}
                 disabledReason="The report artifact isn't available yet."
-                onClick={() => reportKey && void openArtifact(reportKey)}
+                onClick={showReport}
               >
                 View report
               </Button>
@@ -285,12 +303,16 @@ export default function RunDetailPage() {
               id: 'output',
               header: 'Output',
               cell: (task) =>
-                task.artifactKey ? (
+                task.taskId === '__report' && reportKey ? (
+                  <Button variant="inline-link" onClick={showReport}>
+                    View report
+                  </Button>
+                ) : task.artifactKey ? (
                   <Button
                     variant="inline-link"
                     onClick={() => void openArtifact(task.artifactKey!)}
                   >
-                    {task.taskId === '__report' ? 'View report' : 'View'}
+                    View
                   </Button>
                 ) : (
                   '—'
@@ -334,123 +356,18 @@ export default function RunDetailPage() {
           </Container>
         )}
 
-        {reportKey && <ReportChat runId={runId} />}
+        {reportKey && (
+          <div ref={reportRef}>
+            <ReportWorkspace
+              runId={runId}
+              reportArtifactKey={reportKey}
+              reportVersions={run.reportVersions}
+              canEdit={canEdit}
+              onSaved={() => void refresh().catch(() => undefined)}
+            />
+          </div>
+        )}
       </SpaceBetween>
     </ContentLayout>
-  );
-}
-
-/**
- * Ask-the-report chat: a report-grounded agent answers end-user questions
- * about this run's deliverable. Stateless on the wire — the whole transcript
- * is sent each turn; the backend reuses the run's report worker harness with
- * the report markdown injected as its sole grounding source.
- */
-function ReportChat({ runId }: { runId: string }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [chatError, setChatError] = useState<string | null>(null);
-
-  async function send() {
-    const question = draft.trim();
-    if (!question || busy) {
-      return;
-    }
-    const history: ChatMessage[] = [...messages, { role: 'user', content: question }];
-    setMessages(history);
-    setDraft('');
-    setChatError(null);
-    setBusy(true);
-    try {
-      const { message } = await api.chatAboutReport(runId, history);
-      setMessages((current) => [...current, message]);
-    } catch (e) {
-      // Keep the user's question in the transcript; surface a retryable error.
-      const notReady =
-        e instanceof ApiError && e.status === 409
-          ? 'The report for this run isn’t available yet.'
-          : null;
-      setChatError(notReady ?? (e instanceof Error ? e.message : 'chat failed'));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Container
-      header={
-        <Header
-          variant="h2"
-          description="Ask questions about this run’s report. Answers are grounded only in the generated report."
-          actions={
-            messages.length > 0 ? (
-              <Button
-                iconName="remove"
-                disabled={busy}
-                onClick={() => {
-                  setMessages([]);
-                  setChatError(null);
-                }}
-              >
-                Clear
-              </Button>
-            ) : undefined
-          }
-        >
-          Ask the report
-        </Header>
-      }
-    >
-      <SpaceBetween size="m">
-        {messages.length === 0 ? (
-          <Box color="text-body-secondary">
-            Try “Summarize the key findings” or “What gaps were flagged?”
-          </Box>
-        ) : (
-          <SpaceBetween size="m">
-            {messages.map((message, index) => (
-              <div
-                key={index}
-                style={{ display: 'flex', justifyContent: message.role === 'user' ? 'flex-end' : 'flex-start' }}
-              >
-                <div style={{ maxWidth: '85%' }}>
-                  <Box
-                    fontSize="body-s"
-                    color="text-body-secondary"
-                    textAlign={message.role === 'user' ? 'right' : 'left'}
-                  >
-                    {message.role === 'user' ? 'You' : 'Report assistant'}
-                  </Box>
-                  {message.role === 'assistant' ? (
-                    <Markdown text={message.content} />
-                  ) : (
-                    <Box variant="p">{message.content}</Box>
-                  )}
-                </div>
-              </div>
-            ))}
-            {busy && <StatusIndicator type="loading">Thinking…</StatusIndicator>}
-          </SpaceBetween>
-        )}
-
-        {chatError && (
-          <Alert type="error" dismissible onDismiss={() => setChatError(null)}>
-            {chatError}
-          </Alert>
-        )}
-
-        <PromptInput
-          value={draft}
-          onChange={({ detail }) => setDraft(detail.value)}
-          onAction={() => void send()}
-          disabled={busy}
-          actionButtonAriaLabel="Send question"
-          actionButtonIconName="send"
-          placeholder="Ask a question about this report"
-          maxRows={6}
-        />
-      </SpaceBetween>
-    </Container>
   );
 }

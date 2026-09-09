@@ -8,6 +8,7 @@ import {
   validateCreateWorkflow,
   validatePutAgentConfig,
   validatePutOrgSettings,
+  validatePutReport,
   validateUpdateWorkflow,
 } from '../src/validation';
 import { callerGroups, isAdmin, type HttpEvent } from '../handlers-src/lib/http';
@@ -35,6 +36,13 @@ describe('matchRoute', () => {
       params: { runId: 'run-1' },
     });
     expect(matchRoute('GET', '/runs/run-1/chat')).toBeNull();
+  });
+  it('matches the report-edit route (PUT only)', () => {
+    expect(matchRoute('PUT', '/runs/run-1/report')).toEqual({
+      key: 'putReport',
+      params: { runId: 'run-1' },
+    });
+    expect(matchRoute('POST', '/runs/run-1/report')).toBeNull();
   });
   it('matches the delete-workflow route', () => {
     expect(matchRoute('DELETE', '/workflows/wf-1')).toEqual({
@@ -340,6 +348,34 @@ describe('validateChatReport', () => {
       content: `t${i}`,
     }));
     expect(validateChatReport({ messages: atCap }).ok).toBe(true);
+  });
+});
+
+describe('validatePutReport', () => {
+  it('accepts markdown + baseVersion, normalizes CRLF, trims the note', () => {
+    expect(
+      validatePutReport({ markdown: '# A\r\n\r\nx', baseVersion: 2, note: '  tidy  ' }),
+    ).toEqual({
+      ok: true,
+      value: { markdown: '# A\n\nx', baseVersion: 2, note: 'tidy' },
+    });
+    expect(validatePutReport({ markdown: '# A', baseVersion: '1' })).toEqual({
+      ok: true,
+      value: { markdown: '# A', baseVersion: 1 },
+    });
+  });
+  it('rejects empty markdown, bad baseVersion, oversized content', () => {
+    expect(validatePutReport({ markdown: '   ', baseVersion: 1 }).ok).toBe(false);
+    expect(validatePutReport({ baseVersion: 1 }).ok).toBe(false);
+    expect(validatePutReport({ markdown: '# A' }).ok).toBe(false);
+    expect(validatePutReport({ markdown: '# A', baseVersion: 0 }).ok).toBe(false);
+    expect(validatePutReport({ markdown: '# A', baseVersion: 1.5 }).ok).toBe(false);
+    expect(
+      validatePutReport({ markdown: 'x'.repeat(400_001), baseVersion: 1 }).ok,
+    ).toBe(false);
+    expect(
+      validatePutReport({ markdown: '# A', baseVersion: 1, note: 'n'.repeat(513) }).ok,
+    ).toBe(false);
   });
 });
 
