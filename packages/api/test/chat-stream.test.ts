@@ -229,6 +229,8 @@ describe('runChatStream — event stream', () => {
     // Same-origin by default: no CORS headers unless configured.
     expect(sink.headers?.['access-control-allow-origin']).toBeUndefined();
     const events = sink.events();
+    // Plain answers never announce drafting.
+    expect(events.some((e) => e.type === 'status')).toBe(false);
     const text = events.filter((e) => e.type === 'delta').map((e) => e.text).join('');
     expect(text).toBe('Revenue grew 12%.');
     const done = events.find((e) => e.type === 'done')!;
@@ -262,6 +264,13 @@ describe('runChatStream — event stream', () => {
     expect(text).not.toContain('edit-proposal');
     expect(text).not.toContain('{');
     expect(text.trim()).toBe('Tightened it.');
+    // The client is told visible text has paused for drafting, exactly once,
+    // after the last visible delta and before done.
+    const types = events.map((e) => e.type);
+    expect(types.filter((t) => t === 'status')).toHaveLength(1);
+    expect(events.find((e) => e.type === 'status')).toEqual({ type: 'status', phase: 'drafting-edit' });
+    expect(types.indexOf('status')).toBeGreaterThan(types.lastIndexOf('delta'));
+    expect(types.indexOf('status')).toBeLessThan(types.indexOf('done'));
     const done = events.find((e) => e.type === 'done')!;
     expect((done.message as Record<string, unknown>).content).toBe('Tightened it.');
     expect((done.message as Record<string, unknown>).proposedEdit).toEqual({

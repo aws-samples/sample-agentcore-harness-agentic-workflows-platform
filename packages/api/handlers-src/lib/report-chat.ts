@@ -398,7 +398,8 @@ const FENCE_OPEN = '```edit-proposal';
  */
 export class ProposalGate {
   private pending = '';
-  private fenced = false;
+  /** True once the proposal fence has begun; visible output stops here. */
+  public fenced = false;
   /** Everything received so far (for final parsing). */
   public collected = '';
 

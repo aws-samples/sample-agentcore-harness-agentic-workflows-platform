@@ -183,6 +183,7 @@ export async function runChatStream(
     deps.keepaliveMs ?? 10_000,
   );
   const gate = new ProposalGate();
+  let announcedDrafting = false;
   try {
     for await (const delta of deps.invoke(
       chatInvocationArgs(harnessArn, loaded.context, validated.value.messages),
@@ -190,6 +191,13 @@ export async function runChatStream(
       const visible = gate.push(delta);
       if (visible) {
         sink.write(sse({ type: 'delta', text: visible }));
+      }
+      // Once the proposal fence begins, visible text stops on purpose while
+      // the model writes the (long) replacement section — tell the client so
+      // it can show progress instead of appearing frozen mid-sentence.
+      if (gate.fenced && !announcedDrafting) {
+        announcedDrafting = true;
+        sink.write(sse({ type: 'status', phase: 'drafting-edit' }));
       }
     }
     const tail = gate.flush();

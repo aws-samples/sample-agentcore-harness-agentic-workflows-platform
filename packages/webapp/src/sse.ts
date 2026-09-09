@@ -6,6 +6,8 @@
  */
 export async function* readSseEvents(
   body: ReadableStream<Uint8Array>,
+  /** Called on every raw chunk, including comment-only keepalives. */
+  onChunk?: () => void,
 ): AsyncGenerator<string, void, undefined> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -13,6 +15,9 @@ export async function* readSseEvents(
   try {
     for (;;) {
       const { value, done } = await reader.read();
+      if (value) {
+        onChunk?.();
+      }
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
       // Normalize CRLF, then split on blank lines (event boundaries).
       buffer = buffer.replace(/\r\n/g, '\n');

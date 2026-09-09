@@ -197,8 +197,24 @@ export interface ChatReply {
 
 type StreamEvent =
   | { type: 'delta'; text: string }
+  | { type: 'status'; phase: 'drafting-edit' }
   | ({ type: 'done' } & ChatReply)
   | { type: 'error'; status: number; error: string };
+
+export type ChatStreamPhase = 'drafting-edit';
+
+export interface ChatStreamCallbacks {
+  onDelta: (text: string) => void;
+  /** Server-side phase changes (e.g. visible text paused while an edit drafts). */
+  onStatus?: (phase: ChatStreamPhase) => void;
+}
+
+/**
+ * Silence longer than this aborts the stream. The server writes an SSE
+ * keepalive every 10s while the model works, so a full minute with no bytes
+ * means the connection is genuinely dead, not slow.
+ */
+const STREAM_STALL_MS = 60_000;
 
 /**
  * Streaming report chat (D-30). Prefers the response-streaming Function URL
@@ -211,9 +227,29 @@ type StreamEvent =
 export async function chatAboutReportStream(
   runId: string,
   messages: ChatMessage[],
-  onDelta: (text: string) => void,
-  signal?: AbortSignal,
+  callbacks: ChatStreamCallbacks | ((text: string) => void),
+  externalSignal?: AbortSignal,
 ): Promise<ChatReply> {
+  const { onDelta, onStatus } =
+    typeof callbacks === 'function' ? { onDelta: callbacks, onStatus: undefined } : callbacks;
+  // Stall watchdog: abort if NOTHING (not even a keepalive) arrives for a
+  // while, so a dead connection surfaces as an error instead of a spinner
+  // that never ends.
+  const controller = new AbortController();
+  const signal = controller.signal;
+  let stalled = false;
+  let watchdog: number | undefined;
+  const armWatchdog = () => {
+    if (watchdog !== undefined) window.clearTimeout(watchdog);
+    watchdog = window.setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, STREAM_STALL_MS);
+  };
+  const disarm = () => {
+    if (watchdog !== undefined) window.clearTimeout(watchdog);
+  };
+  externalSignal?.addEventListener('abort', () => controller.abort(), { once: true });
   const config = await loadConfig();
   const wire = messages.map(({ role, content }) => ({ role, content }));
   if (!config.chatStreamUrl) {
@@ -230,6 +266,7 @@ export async function chatAboutReportStream(
   const base = new URL(config.chatStreamUrl, window.location.origin).toString().replace(/\/$/, '');
   const body = JSON.stringify({ messages: wire });
   let response: Response;
+  armWatchdog();
   try {
     response = await fetch(`${base}/runs/${encodeURIComponent(runId)}/chat`, {
       method: 'POST',
@@ -247,7 +284,11 @@ export async function chatAboutReportStream(
       signal,
     });
   } catch (e) {
-    if (signal?.aborted) throw e;
+    disarm();
+    if (stalled) {
+      throw new ApiError(504, 'the report assistant did not respond — please try again');
+    }
+    if (externalSignal?.aborted) throw e;
     // Network-level failure before any bytes: fall back to the API route.
     return api.chatAboutReport(runId, messages);
   }
@@ -269,22 +310,39 @@ export async function chatAboutReportStream(
     return api.chatAboutReport(runId, messages);
   }
   let sawDelta = false;
-  for await (const data of readSseEvents(response.body)) {
-    let event: StreamEvent;
-    try {
-      event = JSON.parse(data) as StreamEvent;
-    } catch {
-      continue;
+  try {
+    // Every raw chunk (including comment-only keepalives) re-arms the watchdog.
+    for await (const data of readSseEvents(response.body, armWatchdog)) {
+      let event: StreamEvent;
+      try {
+        event = JSON.parse(data) as StreamEvent;
+      } catch {
+        continue;
+      }
+      if (event.type === 'delta') {
+        sawDelta = true;
+        onDelta(event.text);
+      } else if (event.type === 'status') {
+        onStatus?.(event.phase);
+      } else if (event.type === 'done') {
+        const { type: _type, ...reply } = event;
+        return reply;
+      } else if (event.type === 'error') {
+        throw new ApiError(event.status, event.error);
+      }
     }
-    if (event.type === 'delta') {
-      sawDelta = true;
-      onDelta(event.text);
-    } else if (event.type === 'done') {
-      const { type: _type, ...reply } = event;
-      return reply;
-    } else if (event.type === 'error') {
-      throw new ApiError(event.status, event.error);
+  } catch (e) {
+    if (stalled) {
+      throw new ApiError(
+        504,
+        sawDelta
+          ? 'the answer stalled mid-stream — please try again'
+          : 'the report assistant did not respond — please try again',
+      );
     }
+    throw e;
+  } finally {
+    disarm();
   }
   // Stream ended without a `done` event.
   if (!sawDelta) {

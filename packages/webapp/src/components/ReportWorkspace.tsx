@@ -362,6 +362,12 @@ function ReportChat(props: ReportChatProps) {
   const [applied, setApplied] = useState<Set<number>>(new Set());
   /** In-flight assistant text ('' = waiting for first token; null = idle). */
   const [streaming, setStreaming] = useState<string | null>(null);
+  /**
+   * Set when the server pauses visible text to draft an edit proposal
+   * (which is never streamed as text). Without this the bubble looks frozen
+   * mid-sentence for the 10–50s a section rewrite takes.
+   */
+  const [drafting, setDrafting] = useState(false);
 
   async function send() {
     const question = draft.trim();
@@ -373,20 +379,24 @@ function ReportChat(props: ReportChatProps) {
     setDraft('');
     setChatError(null);
     setStreaming('');
+    setDrafting(false);
     setBusy(true);
     try {
       // Streams visible text as it arrives (D-30); the final reply carries
       // any edit proposal, which is deliberately never streamed as text.
-      const { message, reportVersion } = await chatAboutReportStream(
-        runId,
-        history,
-        (text) => setStreaming((current) => (current ?? '') + text),
-      );
+      const { message, reportVersion } = await chatAboutReportStream(runId, history, {
+        onDelta: (text) => setStreaming((current) => (current ?? '') + text),
+        onStatus: (phase) => {
+          if (phase === 'drafting-edit') setDrafting(true);
+        },
+      });
       setStreaming(null);
+      setDrafting(false);
       setMessages((current) => [...current, message]);
       setAnsweredVersion(reportVersion);
     } catch (e) {
       setStreaming(null);
+      setDrafting(false);
       if (e instanceof ApiError && e.status === 409) {
         setChatError('The report for this run isn’t available yet.');
       } else if (e instanceof ApiError && e.status === 503) {
@@ -497,9 +507,18 @@ function ReportChat(props: ReportChatProps) {
                     Report assistant
                   </Box>
                   {streaming ? (
-                    <Markdown text={streaming} />
+                    <SpaceBetween size="xs">
+                      <Markdown text={streaming} />
+                      {drafting && (
+                        <StatusIndicator type="loading">
+                          Drafting a section edit — this can take up to a minute…
+                        </StatusIndicator>
+                      )}
+                    </SpaceBetween>
                   ) : (
-                    <StatusIndicator type="loading">Thinking…</StatusIndicator>
+                    <StatusIndicator type="loading">
+                      {drafting ? 'Drafting a section edit…' : 'Thinking…'}
+                    </StatusIndicator>
                   )}
                 </div>
               </div>
