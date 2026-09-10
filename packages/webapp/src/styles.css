@@ -78,11 +78,12 @@ body {
   overflow: hidden;
 }
 
-/* Action bar stays visible while a long section scrolls under it. */
+/* Per-section header: static on purpose. It used to be sticky, but inside
+   the overflow-clipped .report-review box that made the box its sticky
+   context, so the bar sat a fixed 58px down and covered the section's own
+   diff (a one-line title change vanished under it). The summary bar above
+   the report is the one that sticks. */
 .report-review-bar {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   padding: 10px 14px;
   background: var(--color-background-status-info, #f2f8fd);
   border-bottom: 1px solid var(--color-border-status-info, #0972d3);
@@ -234,10 +235,6 @@ body {
   background: var(--color-background-status-info, #f2f8fd);
   border: 1px solid var(--color-border-status-info, #0972d3);
   border-radius: 8px;
-}
-/* Per-section bars sit under the summary bar when both stick. */
-.report-review .report-review-bar {
-  top: 58px;
 }
 .report-review-rejected .report-diff-added,
 .report-review-rejected .report-diff-merged ins {
