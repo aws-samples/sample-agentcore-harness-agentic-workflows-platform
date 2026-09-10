@@ -7,6 +7,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -27,6 +28,7 @@ import TopNavigation from '@cloudscape-design/components/top-navigation';
 import { isDarkMode, setDarkMode } from '../appearance';
 import { displayName, signOut } from '../auth';
 import { useRecents } from '../recents';
+import { watchForNewBundle } from '../version';
 
 export interface FlashMessage {
   type: 'success' | 'error' | 'info' | 'warning';
@@ -127,6 +129,27 @@ export default function AppShell() {
   const setBreadcrumbs = useCallback((items: BreadcrumbGroupProps.Item[]) => {
     setBreadcrumbsState([{ text: 'Agentic Workflows', href: '/' }, ...items]);
   }, []);
+
+  // A tab left open across a deploy runs old client code against the new
+  // API. Offer a reload (sticky, not dismissible: the problem persists until
+  // they do) rather than letting the mismatch surface as odd behavior.
+  useEffect(
+    () =>
+      watchForNewBundle(() => {
+        setFlashItems((current) => [
+          {
+            id: 'new-version',
+            type: 'info',
+            header: 'A new version of this app is available',
+            content: 'Reload to pick it up. Unsaved edits in the report editor will be lost.',
+            buttonText: 'Reload',
+            onButtonClick: () => window.location.reload(),
+          },
+          ...current.filter((item) => item.id !== 'new-version'),
+        ]);
+      }),
+    [],
+  );
 
   const setTools = useCallback((panel: ReactNode | null) => setToolsState(panel), []);
   const openTools = useCallback(() => setToolsOpen(true), [setToolsOpen]);

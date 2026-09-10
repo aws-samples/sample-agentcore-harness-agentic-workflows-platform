@@ -338,9 +338,34 @@ export class MarketingWorkflowStack extends Stack {
         sourceArn: `arn:${this.partition}:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
       });
     }
+    // Two deployments so cache lifetimes match how Vite names files. Hashed
+    // assets (assets/index-<hash>.js) never change in place, so they are
+    // immutable for a year and old ones are kept — a tab opened before a
+    // deploy keeps working. The entry files (index.html, config.json) are
+    // what points at the current bundle, so they must never be served
+    // stale: without an explicit Cache-Control the browser applies
+    // heuristic freshness (~10% of the file's age) and can keep an old
+    // index.html for an hour after a deploy (live finding: a tab ran the
+    // previous bundle against the new API and rendered nothing).
+    new s3deploy.BucketDeployment(this, 'WebAppAssetsDeploy', {
+      destinationBucket: siteBucket,
+      sources: [s3deploy.Source.asset(webappDist)],
+      exclude: ['*'],
+      include: ['assets/*'],
+      prune: false,
+      cacheControl: [
+        s3deploy.CacheControl.maxAge(Duration.days(365)),
+        s3deploy.CacheControl.immutable(),
+      ],
+    });
     new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
       destinationBucket: siteBucket,
       distribution,
+      exclude: ['assets/*'],
+      cacheControl: [
+        s3deploy.CacheControl.noCache(),
+        s3deploy.CacheControl.mustRevalidate(),
+      ],
       sources: [
         s3deploy.Source.asset(webappDist),
         s3deploy.Source.jsonData('config.json', {
