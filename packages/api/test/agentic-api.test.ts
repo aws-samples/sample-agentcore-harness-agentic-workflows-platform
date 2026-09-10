@@ -150,6 +150,30 @@ describe('AgenticApi', () => {
     expect(streamPolicy).not.toContain('states:');
   });
 
+  it('never exposes a Lambda publicly: every URL is IAM-auth and no permission has a wildcard principal (threat model T004)', () => {
+    const { template } = synth();
+    // Structural, not string-contains: a future NONE-auth URL or `*`
+    // principal anywhere in the construct fails here, whatever its logical id.
+    const urls = Object.values(template.findResources('AWS::Lambda::Url')) as Array<{
+      Properties: { AuthType: string };
+    }>;
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) expect(url.Properties.AuthType).toBe('AWS_IAM');
+
+    const permissions = Object.values(template.findResources('AWS::Lambda::Permission')) as Array<{
+      Properties: { Principal: unknown; FunctionUrlAuthType?: string; SourceArn?: unknown; SourceAccount?: unknown };
+    }>;
+    for (const { Properties: p } of permissions) {
+      expect(p.Principal).not.toBe('*');
+      expect(p.FunctionUrlAuthType).not.toBe('NONE');
+      // A service principal must be pinned to a source; an unscoped service
+      // principal is as good as public for that service.
+      if (typeof p.Principal === 'string' && p.Principal.endsWith('.amazonaws.com')) {
+        expect(p.SourceArn ?? p.SourceAccount).toBeDefined();
+      }
+    }
+  });
+
   it('synthesizes without report_chat (chat route disabled, no invoke grant)', () => {
     const app = new App();
     const stack = new Stack(app, 'NoChat');

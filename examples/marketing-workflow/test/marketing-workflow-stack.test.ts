@@ -90,6 +90,38 @@ describe('MarketingWorkflowStack', () => {
     template.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'AWS_IAM' });
   });
 
+  it('never exposes a Lambda publicly in the whole stack, with or without the webapp (threat model T004)', () => {
+    // Runs even when the SPA dist is absent (the CI case) — the guard must
+    // not depend on the webapp being built. A NONE-auth Function URL was
+    // stripped by account guardrails within minutes during development
+    // (D-30); this keeps it from being reintroduced silently.
+    const template = Template.fromStack(
+      new MarketingWorkflowStack(new App(), 'PublicExposureGuard', {
+        defaultModelId: MODEL_ID,
+        removalPolicy: RemovalPolicy.DESTROY,
+        env: { account: '123456789012', region: 'ap-southeast-2' },
+      }),
+    );
+    const urls = Object.values(template.findResources('AWS::Lambda::Url')) as Array<{
+      Properties: { AuthType: string };
+    }>;
+    expect(urls.length).toBeGreaterThan(0); // the chat stream URL exists
+    for (const url of urls) expect(url.Properties.AuthType).toBe('AWS_IAM');
+
+    const permissions = Object.values(template.findResources('AWS::Lambda::Permission')) as Array<{
+      Properties: { Principal: unknown; FunctionUrlAuthType?: string; SourceArn?: unknown; SourceAccount?: unknown };
+    }>;
+    expect(permissions.length).toBeGreaterThan(0);
+    for (const { Properties: p } of permissions) {
+      expect(p.Principal).not.toBe('*');
+      expect(p.FunctionUrlAuthType).not.toBe('NONE');
+      if (typeof p.Principal === 'string' && p.Principal.endsWith('.amazonaws.com')) {
+        // e.g. cloudfront.amazonaws.com must be pinned to THIS distribution.
+        expect(p.SourceArn ?? p.SourceAccount).toBeDefined();
+      }
+    }
+  });
+
   it('registers the default tool subset and leaves patent_search unregistered', () => {
     const template = synth();
     const targets = JSON.stringify(
