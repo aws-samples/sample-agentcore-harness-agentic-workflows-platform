@@ -899,6 +899,22 @@ export function draftingLabel(sections: string[]): string {
   return `Drafting section ${sections.length}: ${current}…`;
 }
 
+/**
+ * Scroll the nearest scrollable ancestor of `marker` so `marker` is at its
+ * bottom, without touching any other scroll container on the page.
+ */
+function scrollToEndWithin(marker: HTMLElement | null): void {
+  let node = marker?.parentElement ?? null;
+  while (node) {
+    const { overflowY } = getComputedStyle(node);
+    if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+      node.scrollTop = node.scrollHeight;
+      return;
+    }
+    node = node.parentElement;
+  }
+}
+
 interface ChatPanelProps {
   canEdit: boolean;
   messages: ChatMessage[];
@@ -925,7 +941,11 @@ function ChatPanel(props: ChatPanelProps) {
   const { messages, canEdit } = props;
   const bottomRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
+    // Keep the newest message in view by scrolling the DRAWER's own scroll
+    // container only. scrollIntoView would scroll every scrollable ancestor,
+    // including the main page, so each chat turn yanked the report to an
+    // unrelated position (live finding).
+    scrollToEndWithin(bottomRef.current);
   }, [messages.length, props.streaming]);
 
   // The draft lives HERE, not in the page. The panel is handed to the shell
