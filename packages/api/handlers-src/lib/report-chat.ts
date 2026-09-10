@@ -22,8 +22,6 @@ import {
   CHAT_MAX_TURNS_LIMIT,
   REPORT_TASK_ID,
   applySectionEdits,
-  editTarget,
-  extractReportSection,
   findReportSection,
   tableKeys,
   type ReportVersion,
@@ -185,11 +183,6 @@ export function decodeProposalBody(
   return { edits };
 }
 
-/** Section markdown minus its heading line and surrounding whitespace. */
-function bodyText(sectionMarkdown: string): string {
-  return sectionMarkdown.replace(/^\s*#{1,6}\s[^\n]*\n?/, '').trim();
-}
-
 export interface ParsedAnswer {
   /** The answer with the proposal block removed. */
   content: string;
@@ -232,17 +225,7 @@ export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnsw
       issues.push(`section not found: "${heading}"`);
       continue;
     }
-    // A heading-only replacement for a section that has text would silently
-    // empty it. Emptying a section is a legitimate request, but it has to be
-    // asked for in words, not slip in as a malformed rewrite.
-    const target = editTarget(reportMarkdown, section, newMarkdown);
-    const currentBody = bodyText(extractReportSection(reportMarkdown, target));
-    if (currentBody.length > 0 && bodyText(newMarkdown).length === 0) {
-      issues.push(
-        `the edit for "${section.heading}" would empty the section, so it was dropped — to remove a section's content, ask for that explicitly`,
-      );
-      continue;
-    }
+
     if (edits.some((e) => findReportSection(reportMarkdown, e.heading)?.startLine === section.startLine)) {
       issues.push(`duplicate edit for "${section.heading}" ignored`);
       continue;

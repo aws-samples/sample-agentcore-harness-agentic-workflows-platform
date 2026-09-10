@@ -6,6 +6,7 @@ import {
   harnessErrorMessage,
   parseChatAnswer,
 } from '../handlers-src/lib/report-chat';
+import { applySectionEdits } from '@agentic-platform/plan-schema';
 
 const REPORT = '# Brief\n\n## Executive summary\n\nRevenue grew 12%.\n\n## Sources\n\n- a';
 
@@ -240,23 +241,15 @@ describe('parseChatAnswer — protecting section content', () => {
     ]);
   });
 
-  it('drops a heading-only replacement that would empty a section with text', () => {
+  it('a heading-only replacement is a rename: accepted, and applying it keeps the body', () => {
     const parsed = parseChatAnswer(
-      'Done.\n```edit-proposal\nsection: ## Executive summary\n---\n## Executive summary\n===\nsection: ## Sources\n---\n## Sources\n\n- b\n```',
+      'Renamed.\n```edit-proposal\nsection: ## Executive summary\n---\n## Executive summary (draft)\n```',
       LONG_REPORT,
     );
-    expect(parsed.proposedEdits).toEqual([{ heading: '## Sources', newMarkdown: '## Sources\n\n- b' }]);
-    expect(parsed.proposalIssue).toMatch(/would empty the section/);
-    expect(parsed.proposalIssue).toMatch(/Executive summary/);
-  });
-
-  it('still allows a heading-only replacement when the section was already empty', () => {
-    const report = '# T\n\n## Notes\n\n## Sources\n\n- a';
-    const parsed = parseChatAnswer(
-      'x\n```edit-proposal\nsection: ## Notes\n---\n## Notes (none)\n```',
-      report,
-    );
     expect(parsed.proposalIssue).toBeUndefined();
-    expect(parsed.proposedEdits?.[0]?.newMarkdown).toBe('## Notes (none)');
+    const applied = applySectionEdits(LONG_REPORT, parsed.proposedEdits!);
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.markdown).toBe(LONG_REPORT.replace('## Executive summary', '## Executive summary (draft)'));
   });
 });

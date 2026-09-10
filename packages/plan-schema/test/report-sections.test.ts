@@ -178,18 +178,32 @@ describe('applySectionEdits', () => {
 import { editTarget } from '../src/report-sections';
 
 describe('editing a section that contains sub-sections', () => {
-  it('renaming the title replaces only the title, never the whole report (live finding)', () => {
+  it('renaming the title replaces only the title line, never the whole report (live finding)', () => {
     const title = findReportSection(DOC, '# Q2 Brief')!;
     expect(title.endLine).toBe(DOC.split('\n').length); // the # range IS the whole doc
     const target = editTarget(DOC, title, '# Company X Q2 Brief');
-    expect(target.startLine).toBe(0);
-    expect(target.endLine).toBe(2); // heading + blank line before "## Executive summary"
+    expect([target.startLine, target.endLine]).toEqual([0, 1]);
 
     const result = replaceReportSection(DOC, '# Q2 Brief', '# Company X Q2 Brief');
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.previous).toBe('# Q2 Brief\n');
+    expect(result.previous).toBe('# Q2 Brief');
     expect(result.markdown).toBe(DOC.replace('# Q2 Brief', '# Company X Q2 Brief'));
+  });
+
+  it('a heading-only replacement renames a section and keeps its body and children', () => {
+    // A byline under the title (the live report has one) must survive a rename.
+    const withByline = DOC.replace('# Q2 Brief\n', '# Q2 Brief\n\n**Prepared for the Board**\n');
+    const title = replaceReportSection(withByline, '# Q2 Brief', '# Company X Brief');
+    expect(title.ok).toBe(true);
+    if (!title.ok) return;
+    expect(title.markdown.startsWith('# Company X Brief\n\n**Prepared for the Board**\n\n## Executive summary')).toBe(true);
+
+    const parent = replaceReportSection(DOC, '## Key findings', '## What we found');
+    expect(parent.ok).toBe(true);
+    if (!parent.ok) return;
+    expect(parent.markdown).toContain('## What we found\n\n### Premiumisation\n\nUp.\n\n### No/low');
+    expect(parent.markdown.split('\n').length).toBe(DOC.split('\n').length);
   });
 
   it('a replacement without sub-headings edits the parent’s own text and keeps its children', () => {

@@ -97,15 +97,18 @@ export function extractReportSection(
 /**
  * The line range a replacement actually stands in for.
  *
- * A section's full range runs to the next heading of the same or higher
- * level, so it CONTAINS its sub-sections — and the `#` title's range is the
- * whole document. A replacement that carries no sub-headings is therefore
- * read as the section's OWN text (heading + body up to its first
- * sub-heading), and the children are kept. A replacement that does include
- * sub-headings restructures the whole range, as written.
+ * Three shapes of replacement, read by what they contain:
+ * - Only a heading line → a RENAME: just the heading line is replaced and
+ *   every line under it stays. (Nobody writes a bare heading to mean
+ *   "delete the body".)
+ * - No sub-headings → the section's OWN text: heading + body up to its
+ *   first sub-heading; the sub-sections are kept.
+ * - With sub-headings → the whole range, restructured as written.
  *
- * Live finding: "rename the company in the title" produced a heading-only
- * replacement for the `#` section, which the old whole-range rule turned
+ * Needed because a section's range runs to the next heading of the same or
+ * higher level, so it CONTAINS its sub-sections — and the `#` title's range
+ * is the whole document. Live finding: "rename the company in the title"
+ * produced a title-only replacement, which the old whole-range rule turned
  * into "delete the entire report" (+13 / −2355 words in review).
  */
 export function editTarget(
@@ -113,6 +116,9 @@ export function editTarget(
   section: ReportSection,
   newMarkdown: string,
 ): ReportSection {
+  if (isHeadingOnly(newMarkdown)) {
+    return { ...section, endLine: section.startLine + 1 };
+  }
   const firstChild = listReportSections(markdown).find(
     (other) => other.startLine > section.startLine && other.startLine < section.endLine,
   );
@@ -179,13 +185,24 @@ export function replaceReportSection(
   return { ok: true, markdown: splice(lines, target, newMarkdown).join('\n'), previous };
 }
 
-/** Replace `target`'s lines with `newMarkdown`, keeping one blank line before what follows. */
+/** True when the replacement is a single heading line and nothing else. */
+function isHeadingOnly(newMarkdown: string): boolean {
+  const lines = newMarkdown.split('\n').filter((line) => line.trim().length > 0);
+  return lines.length === 1 && HEADING.test(lines[0]!);
+}
+
+/**
+ * Replace `target`'s lines with `newMarkdown`. A rename (target is the
+ * heading line alone) swaps that one line; otherwise the block is followed
+ * by one blank line so the next heading stays separated.
+ */
 function splice(lines: string[], target: ReportSection, newMarkdown: string): string[] {
   const body = newMarkdown.replace(/\r\n/g, '\n').replace(/\s+$/, '');
+  const renameOnly = target.endLine === target.startLine + 1;
   const isLast = target.endLine >= lines.length;
   return [
     ...lines.slice(0, target.startLine),
-    ...(isLast ? [body] : [body, '']),
+    ...(renameOnly || isLast ? [body] : [body, '']),
     ...lines.slice(target.endLine),
   ];
 }
