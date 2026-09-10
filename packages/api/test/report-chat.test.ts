@@ -139,6 +139,37 @@ describe('parseChatAnswer', () => {
     ]);
   });
 
+  it('keeps the proposal when the model adds a sign-off after the closing fence (live finding)', () => {
+    const raw = [
+      'Tightened the summary.',
+      '',
+      '```edit-proposal',
+      'section: ## Executive summary',
+      'rationale: shorter',
+      '---',
+      '## Executive summary',
+      '',
+      'Revenue grew 12% year on year.',
+      '```',
+      '',
+      "Let me know if you'd like the Sources tightened too!",
+    ].join('\n');
+    const parsed = parseChatAnswer(raw, REPORT);
+    // Trailing prose is answer text, never part of the report or the fence.
+    expect(parsed.content).toBe(
+      "Tightened the summary.\n\nLet me know if you'd like the Sources tightened too!",
+    );
+    expect(parsed.content).not.toContain('```');
+    expect(parsed.proposalIssue).toBeUndefined();
+    expect(parsed.proposedEdits).toEqual([
+      {
+        heading: '## Executive summary',
+        rationale: 'shorter',
+        newMarkdown: '## Executive summary\n\nRevenue grew 12% year on year.',
+      },
+    ]);
+  });
+
   it('parses several sections separated by === and normalizes headings to the report', () => {
     const raw = [
       'Two sections changed.',

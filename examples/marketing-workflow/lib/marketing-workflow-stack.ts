@@ -292,10 +292,14 @@ export class MarketingWorkflowStack extends Stack {
           cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
       },
       defaultRootObject: 'index.html',
-      // SPA rewrite: the JSON API is a separate origin, so backend errors
-      // never pass through this distribution. The /chat/* behavior below IS
-      // a backend on this distribution, but its error statuses (401/404/409)
-      // are not in this list, so they reach the SPA intact — keep it so.
+      // SPA rewrite: the JSON API is a separate origin, so its errors never
+      // pass through this distribution. The /chat/* behavior below IS a
+      // backend on this distribution, and custom error responses are
+      // distribution-wide, so a 404 from the chat handler (unknown run) or a
+      // 403 from a broken OAC handshake reaches the browser as 200 index.html
+      // (live-verified). 401/400/409/502 pass through intact. The SPA treats
+      // a non-SSE 200 as "streaming unavailable" and falls back to the
+      // buffered API route, which reports the real status.
       errorResponses: [
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
@@ -347,7 +351,7 @@ export class MarketingWorkflowStack extends Stack {
     // heuristic freshness (~10% of the file's age) and can keep an old
     // index.html for an hour after a deploy (live finding: a tab ran the
     // previous bundle against the new API and rendered nothing).
-    new s3deploy.BucketDeployment(this, 'WebAppAssetsDeploy', {
+    const assetsDeploy = new s3deploy.BucketDeployment(this, 'WebAppAssetsDeploy', {
       destinationBucket: siteBucket,
       sources: [s3deploy.Source.asset(webappDist)],
       exclude: ['*'],
@@ -358,7 +362,7 @@ export class MarketingWorkflowStack extends Stack {
         s3deploy.CacheControl.immutable(),
       ],
     });
-    new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
+    const webAppDeploy = new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
       destinationBucket: siteBucket,
       distribution,
       exclude: ['assets/*'],
@@ -379,6 +383,10 @@ export class MarketingWorkflowStack extends Stack {
         }),
       ],
     });
+    // Entry files go live only after the hashed bundle they reference exists;
+    // the two deployments are otherwise independent custom resources and
+    // CloudFormation may finish them in either order.
+    webAppDeploy.node.addDependency(assetsDeploy);
     new CfnOutput(this, 'WebAppUrl', {
       value: `https://${distribution.distributionDomainName}`,
     });

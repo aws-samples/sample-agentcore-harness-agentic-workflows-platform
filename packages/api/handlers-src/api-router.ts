@@ -12,7 +12,12 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   DescribeExecutionCommand,
@@ -1032,14 +1037,36 @@ async function putReport(runId: string, event: HttpEvent): Promise<HttpResponse>
   }
   const version = latest.version + 1;
   const artifactKey = artifactKeys.reportVersion(workflowId, runId, version);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: requireEnv('BUCKET_NAME'),
-      Key: artifactKey,
-      Body: validated.value.markdown,
-      ContentType: 'text/markdown; charset=utf-8',
-    }),
-  );
+  const bucket = requireEnv('BUCKET_NAME');
+  // The version key is deterministic, so two editors saving from the same
+  // base both target report.v<n>.md. The DynamoDB write below is conditional,
+  // but a plain PutObject is not: the loser's bytes could overwrite the
+  // winner's object before the winner's record update lands. IfNoneMatch: '*'
+  // makes the object write conditional too (S3 returns 412 for the second
+  // writer), so the same 409 the record guard produces applies here.
+  const stored = await s3
+    .send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: artifactKey,
+        Body: validated.value.markdown,
+        ContentType: 'text/markdown; charset=utf-8',
+        IfNoneMatch: '*',
+      }),
+    )
+    .then(() => true)
+    .catch((error: unknown) => {
+      const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (failure.name === 'PreconditionFailed' || failure.$metadata?.httpStatusCode === 412) {
+        return false;
+      }
+      throw error;
+    });
+  if (!stored) {
+    return json(409, {
+      error: 'report changed concurrently — reload and reapply your changes',
+    });
+  }
   const entry: ReportVersion = {
     version,
     artifactKey,
@@ -1069,6 +1096,14 @@ async function putReport(runId: string, event: HttpEvent): Promise<HttpResponse>
     throw error;
   });
   if (!updated) {
+    // The record moved on under us; the object we just wrote belongs to no
+    // version, so remove it rather than leave an orphan. Best effort: a
+    // failed cleanup must not mask the 409 the caller needs.
+    await s3
+      .send(new DeleteObjectCommand({ Bucket: bucket, Key: artifactKey }))
+      .catch((error: unknown) => {
+        console.warn('putReport: orphan cleanup failed', { runId, artifactKey, error });
+      });
     return json(409, {
       error: 'report changed concurrently — reload and reapply your changes',
     });

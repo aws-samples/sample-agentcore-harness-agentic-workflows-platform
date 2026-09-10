@@ -119,9 +119,40 @@ export function buildChatRequest(args: {
   return sections.join('\n\n');
 }
 
-// The proposal body may itself contain fenced code (a table sample, say), so
-// match to the LAST closing fence rather than the first.
-const PROPOSAL_FENCE = /```edit-proposal\s*\n([\s\S]*)\n\s*```\s*$/;
+const PROPOSAL_OPEN = /```edit-proposal[ \t]*\n/;
+// A closing fence is a line holding nothing but backticks.
+const CLOSING_FENCE = /^[ \t]*```[ \t]*$/gm;
+
+/**
+ * Locate the proposal fence in a reply. The body may itself contain fenced
+ * code (a table sample, say), so the block runs to the LAST closing fence in
+ * the reply. Anything after that fence is ordinary answer text: the prompt
+ * asks the model to end on the fence, but a trailing sign-off must not cost
+ * the user the whole proposal (live: "Let me know if you'd like more!" after
+ * the fence used to drop both edits and render the raw fence in the chat).
+ */
+function splitProposalFence(
+  raw: string,
+): { before: string; body: string; after: string } | undefined {
+  const open = PROPOSAL_OPEN.exec(raw);
+  if (!open) {
+    return undefined;
+  }
+  const bodyStart = open.index + open[0].length;
+  let close: RegExpExecArray | undefined;
+  CLOSING_FENCE.lastIndex = bodyStart;
+  for (let match = CLOSING_FENCE.exec(raw); match; match = CLOSING_FENCE.exec(raw)) {
+    close = match;
+  }
+  if (!close) {
+    return undefined;
+  }
+  return {
+    before: raw.slice(0, open.index),
+    body: raw.slice(bodyStart, close.index),
+    after: raw.slice(close.index + close[0].length),
+  };
+}
 
 /**
  * Decode the fenced proposal body into one or more section edits.
@@ -201,12 +232,12 @@ export interface ParsedAnswer {
  * (live incident, v5 of run d66a9f5e).
  */
 export function parseChatAnswer(raw: string, reportMarkdown: string): ParsedAnswer {
-  const match = PROPOSAL_FENCE.exec(raw);
-  if (!match) {
+  const fence = splitProposalFence(raw);
+  if (!fence) {
     return { content: raw.trim() };
   }
-  const content = raw.replace(PROPOSAL_FENCE, '').trim();
-  const decoded = decodeProposalBody(match[1]!);
+  const content = [fence.before.trim(), fence.after.trim()].filter(Boolean).join('\n\n');
+  const decoded = decodeProposalBody(fence.body);
   if ('error' in decoded) {
     return { content, proposalIssue: decoded.error };
   }

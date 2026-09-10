@@ -326,6 +326,18 @@ export async function chatAboutReportStream(
   if (!response.body) {
     return api.chatAboutReport(runId, messages);
   }
+  // A 200 that is not an event stream is the SPA's 403/404 → index.html
+  // rewrite catching a chat-origin error (CloudFront error responses are
+  // distribution-wide). The buffered route reports the real status; say why
+  // we went there so a broken streaming path is visible, not silent.
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().startsWith('text/event-stream')) {
+    disarm();
+    console.warn(
+      `report chat: streaming endpoint answered ${response.status} ${contentType || '(no content-type)'} instead of text/event-stream — falling back to the buffered route`,
+    );
+    return api.chatAboutReport(runId, messages);
+  }
   let sawDelta = false;
   try {
     // Every raw chunk (including comment-only keepalives) re-arms the watchdog.

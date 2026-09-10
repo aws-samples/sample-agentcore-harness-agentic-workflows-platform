@@ -386,10 +386,13 @@ describe('PUT /runs/{runId}/report', () => {
     const v2Key = `artifacts/${WORKFLOW_ID}/${RUN_ID}/report.v2.md`;
 
     // New object, original untouched.
-    const put = mocks.s3Send.mock.calls[0]![0] as { input: { Key: string; Body: string; ContentType: string } };
+    const put = mocks.s3Send.mock.calls[0]![0] as {
+      input: { Key: string; Body: string; ContentType: string; IfNoneMatch?: string };
+    };
     expect(put.input.Key).toBe(v2Key);
     expect(put.input.Body).toBe(body.markdown);
     expect(put.input.ContentType).toMatch(/markdown/);
+    expect(put.input.IfNoneMatch).toBe('*');
 
     // Run record: pointer moves, history synthesizes v1 then appends v2,
     // and the write is conditioned on the key we read.
@@ -417,9 +420,39 @@ describe('PUT /runs/{runId}/report', () => {
         throw error;
       },
     });
-    mocks.s3Send.mockResolvedValueOnce({});
+    mocks.s3Send.mockResolvedValue({});
     const response = await handler(putEvent(body));
     expect(response.statusCode).toBe(409);
     expect(JSON.parse(response.body).error).toMatch(/concurrently/);
+    // The object written before the lost condition is cleaned up, not orphaned.
+    const v2Key = `artifacts/${WORKFLOW_ID}/${RUN_ID}/report.v2.md`;
+    const names = mocks.s3Send.mock.calls.map(
+      (call) => (call[0] as { constructor: { name: string } }).constructor.name,
+    );
+    expect(names).toEqual(['PutObjectCommand', 'DeleteObjectCommand']);
+    const del = mocks.s3Send.mock.calls[1]![0] as { input: { Key: string } };
+    expect(del.input.Key).toBe(v2Key);
+  });
+
+  it('writes the version object conditionally and 409s when another save got there first', async () => {
+    routeDdb({ run: () => runItem(), meta: () => metaItem() });
+    // Two editors from base v1 both target report.v2.md; S3 rejects the
+    // second writer with 412 because the first one's IfNoneMatch already won.
+    const precondition = new Error('At least one of the pre-conditions you specified did not hold');
+    (precondition as { name: string }).name = 'PreconditionFailed';
+    (precondition as { $metadata: { httpStatusCode: number } }).$metadata = { httpStatusCode: 412 };
+    mocks.s3Send.mockRejectedValueOnce(precondition);
+
+    const response = await handler(putEvent(body));
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body).error).toMatch(/concurrently/);
+
+    const put = mocks.s3Send.mock.calls[0]![0] as { input: { IfNoneMatch?: string } };
+    expect(put.input.IfNoneMatch).toBe('*');
+    // The record is never touched when the object write loses.
+    const updates = mocks.ddbSend.mock.calls.filter(
+      (call) => (call[0] as { constructor: { name: string } }).constructor.name === 'UpdateCommand',
+    );
+    expect(updates).toHaveLength(0);
   });
 });
