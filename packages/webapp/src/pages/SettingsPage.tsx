@@ -3,8 +3,9 @@
  * catalog are previews — they need aggregation/catalog APIs the platform
  * doesn't expose yet.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { CHAT_MAX_TURNS_DEFAULT, CHAT_MAX_TURNS_LIMIT } from '@agentic-platform/plan-schema';
 import Alert from '@cloudscape-design/components/alert';
 import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
@@ -164,7 +165,19 @@ function OrganizationConfiguration() {
   /** Per-agent thinking effort drafts; '' = deployed default, 'off' = off. */
   const [thinkingDrafts, setThinkingDrafts] = useState<Record<string, string>>({});
   const [catalogRows, setCatalogRows] = useState<CatalogModelEntry[]>([]);
+  /** Report chat turn-limit draft (string for the numeric input). */
+  const [chatTurnsDraft, setChatTurnsDraft] = useState(String(CHAT_MAX_TURNS_DEFAULT));
   const [busy, setBusy] = useState<string | null>(null);
+  const chatTurnsError = useMemo(() => {
+    const value = Number(chatTurnsDraft);
+    if (chatTurnsDraft.trim() === '' || !Number.isInteger(value)) {
+      return 'Enter a whole number.';
+    }
+    if (value < 1 || value > CHAT_MAX_TURNS_LIMIT) {
+      return `Must be between 1 and ${CHAT_MAX_TURNS_LIMIT}.`;
+    }
+    return undefined;
+  }, [chatTurnsDraft]);
 
   const load = useCallback(async () => {
     try {
@@ -184,6 +197,7 @@ function OrganizationConfiguration() {
       setCatalogRows(
         response.org.modelCatalog ?? response.deployedModelCatalog ?? [],
       );
+      setChatTurnsDraft(String(response.org.chatMaxTurns ?? CHAT_MAX_TURNS_DEFAULT));
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error));
@@ -248,6 +262,25 @@ function OrganizationConfiguration() {
     }
   };
 
+  const saveChatMaxTurns = async (value: number | null) => {
+    setBusy('chat');
+    try {
+      await api.putOrgSettings({ chatMaxTurns: value });
+      notify({
+        type: 'success',
+        content:
+          value === null
+            ? `Report chat limit restored to the default (${CHAT_MAX_TURNS_DEFAULT} turns).`
+            : `Report chat limit set to ${value} turns — applies to the next message.`,
+      });
+      await load();
+    } catch (error) {
+      failure(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const saveCatalog = async (rows: CatalogModelEntry[] | null) => {
     setBusy('catalog');
     try {
@@ -257,7 +290,9 @@ function OrganizationConfiguration() {
           ...(row.description?.trim() ? { description: row.description.trim() } : {}),
         }))
         .filter((row) => row.modelId);
-      await api.putOrgSettings(cleaned && cleaned.length > 0 ? cleaned : null);
+      await api.putOrgSettings({
+        modelCatalog: cleaned && cleaned.length > 0 ? cleaned : null,
+      });
       notify({
         type: 'success',
         content:
@@ -594,6 +629,60 @@ function OrganizationConfiguration() {
                 onClick={() => void saveCatalog(null)}
               >
                 Restore deployed default
+              </Button>
+            </SpaceBetween>
+          )}
+        </SpaceBetween>
+      </Container>
+
+      <Container
+        header={
+          <Header
+            variant="h2"
+            description="Limits for the “Ask the report” assistant on run pages. The whole conversation is sent with every message, so longer conversations cost more per turn."
+            actions={
+              settings.org.chatMaxTurns !== undefined ? (
+                <Badge color="blue">Customized</Badge>
+              ) : undefined
+            }
+          >
+            Report chat
+          </Header>
+        }
+      >
+        <SpaceBetween size="s">
+          <FormField
+            label="Maximum conversation length"
+            description={`Turns per conversation (each question and each answer is one turn). Default ${CHAT_MAX_TURNS_DEFAULT}, maximum ${CHAT_MAX_TURNS_LIMIT}. Users clear the conversation to continue once the limit is reached.`}
+            errorText={chatTurnsError}
+          >
+            <Input
+              type="number"
+              inputMode="numeric"
+              value={chatTurnsDraft}
+              readOnly={!admin}
+              onChange={({ detail }) => setChatTurnsDraft(detail.value)}
+            />
+          </FormField>
+          {admin && (
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button
+                variant="primary"
+                loading={busy === 'chat'}
+                disabled={
+                  !!chatTurnsError ||
+                  Number(chatTurnsDraft) === (settings.org.chatMaxTurns ?? CHAT_MAX_TURNS_DEFAULT)
+                }
+                onClick={() => void saveChatMaxTurns(Number(chatTurnsDraft))}
+              >
+                Save
+              </Button>
+              <Button
+                disabled={settings.org.chatMaxTurns === undefined}
+                loading={busy === 'chat'}
+                onClick={() => void saveChatMaxTurns(null)}
+              >
+                Restore default
               </Button>
             </SpaceBetween>
           )}

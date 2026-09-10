@@ -5,6 +5,7 @@
 import type { PlanDocument } from '@agentic-platform/plan-schema';
 import { currentToken, signOut } from './auth';
 import { loadConfig } from './config';
+import { readSseEvents } from './sse';
 
 export type FailurePolicy = 'contain' | 'fail-fast' | 'retry-run';
 
@@ -51,8 +52,16 @@ export interface AgentConfig {
 
 export interface OrgSettings {
   modelCatalog?: CatalogModelEntry[];
+  /** Report chat conversation limit in turns; absent = platform default (100). */
+  chatMaxTurns?: number;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+/** Tri-state org settings patch: undefined = untouched, null = restore default. */
+export interface OrgSettingsPatch {
+  modelCatalog?: CatalogModelEntry[] | null;
+  chatMaxTurns?: number | null;
 }
 
 export interface SettingsResponse {
@@ -77,7 +86,10 @@ export interface RunDetail extends RunSummary {
   replanned?: boolean;
   tokensInputTotal?: number;
   tokensOutputTotal?: number;
+  /** Latest report version's key. */
   reportArtifactKey?: string;
+  /** Edit history (absent until the first user edit; v1 is implied). */
+  reportVersions?: ReportVersion[];
 }
 
 export interface TaskView {
@@ -88,6 +100,40 @@ export interface TaskView {
   tokens?: { inputTokens: number; outputTokens: number };
   startedAt?: string;
   finishedAt?: string;
+}
+
+/**
+ * A section-scoped edit the report assistant proposes. `heading` is an
+ * existing heading line in the report; `newMarkdown` is the complete
+ * replacement for that section (starting with its heading). Validated
+ * server-side against the current report, so it always splices.
+ */
+export interface ProposedEdit {
+  heading: string;
+  newMarkdown: string;
+  rationale?: string;
+}
+
+/** A single turn in a report-chat conversation. */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  /**
+   * Assistant turns only: applicable section edits, all proposed at once
+   * (one per distinct section). The user accepts or keeps current per section.
+   */
+  proposedEdits?: ProposedEdit[];
+  /** Assistant turns only: why a returned proposal (or part) was dropped. */
+  proposalIssue?: string;
+}
+
+/** One saved revision of a run's report (v1 = the generated original). */
+export interface ReportVersion {
+  version: number;
+  artifactKey: string;
+  savedAt: string;
+  savedBy?: string;
+  note?: string;
 }
 
 export interface PlanDraftJob {
@@ -149,6 +195,191 @@ async function request<T>(
   return payload as T;
 }
 
+/** Lowercase hex SHA-256 of a string (the SigV4 payload-hash format). */
+export async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export interface ChatReply {
+  message: ChatMessage;
+  reportVersion: number;
+}
+
+type StreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'status'; phase: 'drafting-edit'; sections?: string[] }
+  | ({ type: 'done' } & ChatReply)
+  | { type: 'error'; status: number; error: string };
+
+export type ChatStreamPhase = 'drafting-edit';
+
+export interface ChatStreamStatus {
+  phase: ChatStreamPhase;
+  /** Section titles the model has started so far (grows as drafting proceeds). */
+  sections: string[];
+}
+
+export interface ChatStreamCallbacks {
+  onDelta: (text: string) => void;
+  /** Server-side phase changes (e.g. visible text paused while an edit drafts). */
+  onStatus?: (status: ChatStreamStatus) => void;
+}
+
+/**
+ * Silence longer than this aborts the stream. The server writes an SSE
+ * keepalive every 10s while the model works, so a full minute with no bytes
+ * means the connection is genuinely dead, not slow.
+ */
+const STREAM_STALL_MS = 60_000;
+
+/**
+ * Streaming report chat (D-30). Prefers the response-streaming Function URL
+ * when the deployment provides one, calling `onDelta` with visible text as
+ * it arrives and resolving with the final reply (which carries any edit
+ * proposal). Falls back to the buffered API route when no stream URL is
+ * configured or the stream fails before producing any text — so older
+ * deployments keep working and a transient stream failure still answers.
+ */
+export async function chatAboutReportStream(
+  runId: string,
+  messages: ChatMessage[],
+  callbacks: ChatStreamCallbacks | ((text: string) => void),
+  externalSignal?: AbortSignal,
+): Promise<ChatReply> {
+  const { onDelta, onStatus } =
+    typeof callbacks === 'function' ? { onDelta: callbacks, onStatus: undefined } : callbacks;
+  // Stall watchdog: abort if NOTHING (not even a keepalive) arrives for a
+  // while, so a dead connection surfaces as an error instead of a spinner
+  // that never ends.
+  const controller = new AbortController();
+  const signal = controller.signal;
+  let stalled = false;
+  let watchdog: number | undefined;
+  const armWatchdog = () => {
+    if (watchdog !== undefined) window.clearTimeout(watchdog);
+    watchdog = window.setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, STREAM_STALL_MS);
+  };
+  const disarm = () => {
+    if (watchdog !== undefined) window.clearTimeout(watchdog);
+  };
+  externalSignal?.addEventListener('abort', () => controller.abort(), { once: true });
+  const config = await loadConfig();
+  const wire = messages.map(({ role, content }) => ({ role, content }));
+  if (!config.chatStreamUrl) {
+    return api.chatAboutReport(runId, messages);
+  }
+  const token = currentToken();
+  if (!token) {
+    signOut();
+    window.location.assign('/login');
+    throw new ApiError(401, 'not signed in');
+  }
+  // Relative ('/chat') = same-origin behavior on the SPA's CloudFront
+  // distribution (the deployed default); absolute = a direct URL.
+  const base = new URL(config.chatStreamUrl, window.location.origin).toString().replace(/\/$/, '');
+  const body = JSON.stringify({ messages: wire });
+  let response: Response;
+  armWatchdog();
+  try {
+    response = await fetch(`${base}/runs/${encodeURIComponent(runId)}/chat`, {
+      method: 'POST',
+      headers: {
+        // NOT `authorization`: CloudFront Origin Access Control replaces that
+        // header with its own SigV4 signature on the way to the origin, so
+        // the Cognito token rides in a custom header the handler reads.
+        'x-agentic-token': token,
+        'content-type': 'application/json',
+        // OAC signs origin requests with SigV4; for bodied requests it needs
+        // the payload hash from the viewer or the origin rejects it.
+        'x-amz-content-sha256': await sha256Hex(body),
+      },
+      body,
+      signal,
+    });
+  } catch (e) {
+    disarm();
+    if (stalled) {
+      throw new ApiError(504, 'the report assistant did not respond — please try again');
+    }
+    if (externalSignal?.aborted) throw e;
+    // Network-level failure before any bytes: fall back to the API route.
+    return api.chatAboutReport(runId, messages);
+  }
+  if (response.status === 401) {
+    signOut();
+    window.location.assign('/login?expired=1');
+    throw new ApiError(401, 'session expired');
+  }
+  if (!response.ok) {
+    // The pre-stream failure path returns plain JSON with the same status
+    // semantics as the API route (400/404/409/503) — surface it directly.
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new ApiError(
+      response.status,
+      typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`,
+    );
+  }
+  if (!response.body) {
+    return api.chatAboutReport(runId, messages);
+  }
+  // A 200 that is not an event stream is the SPA's 403/404 → index.html
+  // rewrite catching a chat-origin error (CloudFront error responses are
+  // distribution-wide). The buffered route reports the real status; say why
+  // we went there so a broken streaming path is visible, not silent.
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().startsWith('text/event-stream')) {
+    disarm();
+    console.warn(
+      `report chat: streaming endpoint answered ${response.status} ${contentType || '(no content-type)'} instead of text/event-stream — falling back to the buffered route`,
+    );
+    return api.chatAboutReport(runId, messages);
+  }
+  let sawDelta = false;
+  try {
+    // Every raw chunk (including comment-only keepalives) re-arms the watchdog.
+    for await (const data of readSseEvents(response.body, armWatchdog)) {
+      let event: StreamEvent;
+      try {
+        event = JSON.parse(data) as StreamEvent;
+      } catch {
+        continue;
+      }
+      if (event.type === 'delta') {
+        sawDelta = true;
+        onDelta(event.text);
+      } else if (event.type === 'status') {
+        onStatus?.({ phase: event.phase, sections: event.sections ?? [] });
+      } else if (event.type === 'done') {
+        const { type: _type, ...reply } = event;
+        return reply;
+      } else if (event.type === 'error') {
+        throw new ApiError(event.status, event.error);
+      }
+    }
+  } catch (e) {
+    if (stalled) {
+      throw new ApiError(
+        504,
+        sawDelta
+          ? 'the answer stalled mid-stream — please try again'
+          : 'the report assistant did not respond — please try again',
+      );
+    }
+    throw e;
+  } finally {
+    disarm();
+  }
+  // Stream ended without a `done` event.
+  if (!sawDelta) {
+    return api.chatAboutReport(runId, messages);
+  }
+  throw new ApiError(502, 'the answer stream ended unexpectedly — please try again');
+}
+
 export const api = {
   listWorkflows: () =>
     request<{ workflows: WorkflowSummary[] }>('GET', '/workflows'),
@@ -206,6 +437,31 @@ export const api = {
       'GET',
       `/runs/${runId}/artifact-url?key=${encodeURIComponent(key)}`,
     ),
+  /**
+   * Ask a question about a run's generated report. Stateless: send the whole
+   * conversation (oldest first); the final turn must be the user's question.
+   * Returns the assistant's answer, grounded in the report.
+   */
+  chatAboutReport: (runId: string, messages: ChatMessage[]) =>
+    request<{ message: ChatMessage; reportVersion: number }>(
+      'POST',
+      `/runs/${runId}/chat`,
+      // Only role/content travel; proposals are server-derived.
+      { messages: messages.map(({ role, content }) => ({ role, content })) },
+    ),
+  /**
+   * Save an edited report as a new version (owner or admin). `baseVersion`
+   * is the version the user edited from; a 409 means it moved on.
+   */
+  putReport: (
+    runId: string,
+    input: { markdown: string; baseVersion: number; note?: string },
+  ) =>
+    request<{
+      version: ReportVersion;
+      reportArtifactKey: string;
+      reportVersions: ReportVersion[];
+    }>('PUT', `/runs/${runId}/report`, input),
   // Runtime configuration (D-19): prompts + org settings.
   getSettings: () => request<SettingsResponse>('GET', '/settings'),
   putAgentConfig: (
@@ -223,10 +479,6 @@ export const api = {
       `/settings/agents/${encodeURIComponent(agentName)}`,
       patch,
     ),
-  putOrgSettings: (modelCatalog: CatalogModelEntry[] | null) =>
-    request<{ modelCatalog: CatalogModelEntry[] | null }>(
-      'PUT',
-      '/settings/org',
-      { modelCatalog },
-    ),
+  putOrgSettings: (patch: OrgSettingsPatch) =>
+    request<OrgSettingsPatch & { verified?: boolean }>('PUT', '/settings/org', patch),
 };

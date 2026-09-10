@@ -1,6 +1,7 @@
 /**
  * Pure validation helpers for the API (unit-tested).
  */
+import { CHAT_MAX_TURNS_LIMIT } from '@agentic-platform/plan-schema';
 
 /** EventBridge Scheduler expressions: rate(...) or cron(...). */
 const RATE_PATTERN = /^rate\(\d+ (minute|minutes|hour|hours|day|days)\)$/;
@@ -244,22 +245,162 @@ export function validatePutAgentConfig(
   return { ok: true, value };
 }
 
+/**
+ * Report chat: a conversation turn. `messages` is the prior conversation
+ * (oldest first) and the new user question is the final 'user' turn. The
+ * client sends the whole transcript each call — the endpoint is stateless.
+ */
+const CHAT_MESSAGE_MAX = 8_000;
+/**
+ * Shape-level ceiling. The EFFECTIVE limit is the org setting `chatMaxTurns`
+ * (default CHAT_MAX_TURNS_DEFAULT), enforced by the handlers once settings
+ * are loaded; this hard cap just keeps absurd payloads out before any AWS
+ * call.
+ */
+const CHAT_HISTORY_HARD_MAX = CHAT_MAX_TURNS_LIMIT;
+
+export interface ChatMessageInput {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatReportInput {
+  messages: ChatMessageInput[];
+}
+
+/**
+ * Validate a report-chat request. Requires a non-empty `messages` array whose
+ * final turn is from the user; caps per-message length and history depth to
+ * keep the assembled prompt within the harness budget.
+ */
+export function validateChatReport(
+  body: unknown,
+): { ok: true; value: ChatReportInput } | { ok: false; error: string } {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const raw = input.messages;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: 'messages must be a non-empty array' };
+  }
+  if (raw.length > CHAT_HISTORY_HARD_MAX) {
+    return {
+      ok: false,
+      error: `messages may contain at most ${CHAT_HISTORY_HARD_MAX} turns`,
+    };
+  }
+  const messages: ChatMessageInput[] = [];
+  for (const entry of raw as Array<Record<string, unknown>>) {
+    const role = entry?.role;
+    if (role !== 'user' && role !== 'assistant') {
+      return { ok: false, error: 'each message role must be "user" or "assistant"' };
+    }
+    const content = typeof entry?.content === 'string' ? entry.content.trim() : '';
+    if (!content) {
+      return { ok: false, error: 'each message needs non-empty content' };
+    }
+    if (content.length > CHAT_MESSAGE_MAX) {
+      return {
+        ok: false,
+        error: `message content exceeds ${CHAT_MESSAGE_MAX} chars`,
+      };
+    }
+    messages.push({ role, content });
+  }
+  if (messages[messages.length - 1]!.role !== 'user') {
+    return { ok: false, error: 'the final message must be from the user' };
+  }
+  return { ok: true, value: { messages } };
+}
+
+/** Report edits: full-document saves, bounded to keep S3 objects sane. */
+const REPORT_MARKDOWN_MAX = 400_000;
+const REPORT_NOTE_MAX = 512;
+
+export interface PutReportInput {
+  /** The complete new report markdown. */
+  markdown: string;
+  /**
+   * The version the client edited from. The save is rejected (409) when the
+   * run has moved past it — optimistic concurrency for concurrent editors.
+   */
+  baseVersion: number;
+  /** Optional change note (e.g. the accepted proposal's rationale). */
+  note?: string;
+}
+
+export function validatePutReport(
+  body: unknown,
+): { ok: true; value: PutReportInput } | { ok: false; error: string } {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const markdown =
+    typeof input.markdown === 'string' ? input.markdown.replace(/\r\n/g, '\n') : '';
+  if (markdown.trim().length === 0) {
+    return { ok: false, error: 'markdown is required' };
+  }
+  if (markdown.length > REPORT_MARKDOWN_MAX) {
+    return {
+      ok: false,
+      error: `markdown exceeds ${REPORT_MARKDOWN_MAX} chars`,
+    };
+  }
+  const baseVersion = Number(input.baseVersion);
+  if (!Number.isInteger(baseVersion) || baseVersion < 1) {
+    return { ok: false, error: 'baseVersion must be a positive integer' };
+  }
+  const note = typeof input.note === 'string' ? input.note.trim() : '';
+  if (note.length > REPORT_NOTE_MAX) {
+    return { ok: false, error: `note exceeds ${REPORT_NOTE_MAX} chars` };
+  }
+  return {
+    ok: true,
+    value: { markdown, baseVersion, ...(note ? { note } : {}) },
+  };
+}
+
 const MODEL_CATALOG_MAX = 16;
 const MODEL_ID_MAX = 128;
 const MODEL_DESCRIPTION_MAX = 512;
 
 export interface OrgSettingsInput {
-  modelCatalog: Array<{ modelId: string; description?: string }> | null;
+  /** undefined = untouched; null = restore default; array = set. */
+  modelCatalog?: Array<{ modelId: string; description?: string }> | null;
+  /** undefined = untouched; null = restore default; number = set. */
+  chatMaxTurns?: number | null;
 }
 
-/** Admin org settings: model catalog override; null/empty restores default. */
+/**
+ * Admin org settings, tri-state per field. For backwards compatibility a
+ * body that names neither field is treated as "clear the model catalog"
+ * (the original single-field contract); a body naming only `chatMaxTurns`
+ * leaves the catalog untouched.
+ */
 export function validatePutOrgSettings(
   body: unknown,
 ): { ok: true; value: OrgSettingsInput } | { ok: false; error: string } {
   const input = (body ?? {}) as Record<string, unknown>;
+  const value: OrgSettingsInput = {};
+
+  if ('chatMaxTurns' in input) {
+    const raw = input.chatMaxTurns;
+    if (raw === null || raw === undefined || raw === '') {
+      value.chatMaxTurns = null;
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > CHAT_MAX_TURNS_LIMIT) {
+        return {
+          ok: false,
+          error: `chatMaxTurns must be an integer between 1 and ${CHAT_MAX_TURNS_LIMIT}, or null to restore the default`,
+        };
+      }
+      value.chatMaxTurns = parsed;
+    }
+    if (!('modelCatalog' in input)) {
+      return { ok: true, value };
+    }
+  }
+
   const raw = input.modelCatalog;
   if (raw === null || raw === undefined) {
-    return { ok: true, value: { modelCatalog: null } };
+    return { ok: true, value: { ...value, modelCatalog: null } };
   }
   if (!Array.isArray(raw) || raw.length > MODEL_CATALOG_MAX) {
     return {
@@ -268,7 +409,7 @@ export function validatePutOrgSettings(
     };
   }
   if (raw.length === 0) {
-    return { ok: true, value: { modelCatalog: null } };
+    return { ok: true, value: { ...value, modelCatalog: null } };
   }
   const catalog: OrgSettingsInput['modelCatalog'] = [];
   for (const entry of raw as Array<Record<string, unknown>>) {
@@ -290,5 +431,5 @@ export function validatePutOrgSettings(
     }
     catalog.push({ modelId, ...(description ? { description } : {}) });
   }
-  return { ok: true, value: { modelCatalog: catalog } };
+  return { ok: true, value: { ...value, modelCatalog: catalog } };
 }

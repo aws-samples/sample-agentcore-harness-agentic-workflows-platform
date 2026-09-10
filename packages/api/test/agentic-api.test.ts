@@ -18,6 +18,7 @@ function synth() {
       { name: 'planner', instructions: 'Decompose goals into plans.' },
       { name: 'web_research', instructions: 'Research the web.' },
       { name: 'report_generator', instructions: 'Assemble briefs.' },
+      { name: 'report_chat', instructions: 'Answer questions about reports.' },
     ],
     removalPolicy: RemovalPolicy.DESTROY,
   });
@@ -76,6 +77,127 @@ describe('AgenticApi', () => {
     expect(JSON.stringify(plannerJobPolicy)).toContain(
       'bedrock-agentcore:InvokeHarness',
     );
+  });
+
+  it('grants the router harness invoke on ONLY the report_chat harness', () => {
+    const { template } = synth();
+    const policies = template.findResources('AWS::IAM::Policy');
+    const routerPolicy = Object.values(policies).find((policy) =>
+      JSON.stringify(policy).includes('RouterFn'),
+    );
+    const routerPolicyJson = JSON.stringify(routerPolicy);
+    expect(routerPolicyJson).toContain('bedrock-agentcore:InvokeHarness');
+    expect(routerPolicyJson).toContain('bedrock-agentcore:InvokeAgentRuntime');
+    // Resolve logical ids by HarnessName so the assertion doesn't depend on
+    // construct-path naming.
+    const harnesses = template.findResources('AWS::BedrockAgentCore::Harness');
+    const logicalIdFor = (name: string) =>
+      Object.entries(harnesses).find(
+        ([, res]) => (res as { Properties: { HarnessName: string } }).Properties.HarnessName === name,
+      )![0];
+    expect(routerPolicyJson).toContain(logicalIdFor('report_chat'));
+    // Workers and the planner are never invokable from the API router.
+    expect(routerPolicyJson).not.toContain(logicalIdFor('report_generator'));
+    expect(routerPolicyJson).not.toContain(logicalIdFor('web_research'));
+    expect(routerPolicyJson).not.toContain(logicalIdFor('planner'));
+    // Router learns the chat harness via env.
+    const functions = template.findResources('AWS::Lambda::Function');
+    const router = Object.values(functions).find((fn) =>
+      JSON.stringify(fn).includes('workflow/schedule/run/artifact routes'),
+    );
+    expect(JSON.stringify(router)).toContain('REPORT_CHAT_HARNESS_ARN');
+  });
+
+  it('provisions an IAM-auth response-streaming Function URL for chat with a read-only, single-harness grant (D-30)', () => {
+    const { template, api } = synth();
+    expect(api.chatStreamUrl).toBeDefined();
+    expect(api.chatStreamFunctionUrl).toBeDefined();
+    template.resourceCountIs('AWS::Lambda::Url', 1);
+    template.hasResourceProperties('AWS::Lambda::Url', {
+      AuthType: 'AWS_IAM',
+      InvokeMode: 'RESPONSE_STREAM',
+    });
+    // Never public: no NONE-auth URL and no anonymous invoke permission
+    // (account guardrails strip those anyway — live finding, D-30).
+    const permissions = JSON.stringify(template.findResources('AWS::Lambda::Permission'));
+    expect(permissions).not.toContain('"FunctionUrlAuthType":"NONE"');
+    expect(permissions).not.toContain('lambda:InvokeFunctionUrl');
+    const functions = template.findResources('AWS::Lambda::Function');
+    const streamFn = Object.values(functions).find((fn) =>
+      JSON.stringify(fn).includes('streaming report chat'),
+    )!;
+    const env = (streamFn as { Properties: { Environment: { Variables: Record<string, unknown> } } })
+      .Properties.Environment.Variables;
+    // In-handler JWT verification needs the pool + client; no write targets.
+    expect(Object.keys(env).sort()).toEqual([
+      'BUCKET_NAME',
+      'REPORT_CHAT_HARNESS_ARN',
+      'TABLE_NAME',
+      'USER_POOL_CLIENT_ID',
+      'USER_POOL_ID',
+    ]);
+    const policies = template.findResources('AWS::IAM::Policy');
+    const streamPolicy = JSON.stringify(
+      Object.values(policies).find((policy) => JSON.stringify(policy).includes('ChatStreamFn')),
+    );
+    expect(streamPolicy).toContain('bedrock-agentcore:InvokeHarness');
+    expect(streamPolicy).toContain('dynamodb:GetItem');
+    expect(streamPolicy).toContain('s3:GetObject');
+    // Read-only: no table writes, no bucket writes, no state machine.
+    expect(streamPolicy).not.toContain('dynamodb:PutItem');
+    expect(streamPolicy).not.toContain('dynamodb:UpdateItem');
+    expect(streamPolicy).not.toContain('s3:PutObject');
+    expect(streamPolicy).not.toContain('states:');
+  });
+
+  it('never exposes a Lambda publicly: every URL is IAM-auth and no permission has a wildcard principal (threat model T004)', () => {
+    const { template } = synth();
+    // Structural, not string-contains: a future NONE-auth URL or `*`
+    // principal anywhere in the construct fails here, whatever its logical id.
+    const urls = Object.values(template.findResources('AWS::Lambda::Url')) as Array<{
+      Properties: { AuthType: string };
+    }>;
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) expect(url.Properties.AuthType).toBe('AWS_IAM');
+
+    const permissions = Object.values(template.findResources('AWS::Lambda::Permission')) as Array<{
+      Properties: { Principal: unknown; FunctionUrlAuthType?: string; SourceArn?: unknown; SourceAccount?: unknown };
+    }>;
+    for (const { Properties: p } of permissions) {
+      expect(p.Principal).not.toBe('*');
+      expect(p.FunctionUrlAuthType).not.toBe('NONE');
+      // A service principal must be pinned to a source; an unscoped service
+      // principal is as good as public for that service.
+      if (typeof p.Principal === 'string' && p.Principal.endsWith('.amazonaws.com')) {
+        expect(p.SourceArn ?? p.SourceAccount).toBeDefined();
+      }
+    }
+  });
+
+  it('synthesizes without report_chat (chat route disabled, no invoke grant)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'NoChat');
+    const foundation = new AgenticFoundation(stack, 'F', {
+      workloadName: 'x',
+      defaultModelId: MODEL_ID,
+      agents: [
+        { name: 'planner', instructions: 'plan' },
+        { name: 'worker', instructions: 'work' },
+      ],
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    new AgenticApi(stack, 'Api', { foundation });
+    const template = Template.fromStack(stack);
+    const routerPolicy = Object.values(template.findResources('AWS::IAM::Policy')).find(
+      (policy) => JSON.stringify(policy).includes('RouterFn'),
+    );
+    expect(JSON.stringify(routerPolicy)).not.toContain('bedrock-agentcore:InvokeHarness');
+    const router = Object.values(template.findResources('AWS::Lambda::Function')).find(
+      (fn) => JSON.stringify(fn).includes('workflow/schedule/run/artifact routes'),
+    );
+    expect(JSON.stringify(router)).not.toContain('REPORT_CHAT_HARNESS_ARN');
+    // No streaming endpoint either.
+    template.resourceCountIs('AWS::Lambda::Url', 0);
   });
 
   it('mounts additionalRoutes behind the same JWT authorizer (python-developers seam)', () => {

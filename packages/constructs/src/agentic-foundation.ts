@@ -27,6 +27,13 @@ import { MemoryJanitor } from './memory-janitor';
 import { ObservabilityPack } from './observability';
 import { WorkflowScheduler } from './workflow-scheduler';
 
+/**
+ * Reserved agent names with platform roles. `planner` drafts plans;
+ * `report_chat` serves the API's report chat. Neither is a worker.
+ */
+export const PLANNER_AGENT_NAME = 'planner';
+export const REPORT_CHAT_AGENT_NAME = 'report_chat';
+
 export interface AgenticFoundationProps {
   /** Workload name (lowercase, hyphenated): tag value + dashboard prefix. */
   readonly workloadName: string;
@@ -66,6 +73,12 @@ export class AgenticFoundation extends Construct {
   public readonly table: dynamodb.Table;
   public readonly artifactsBucket: s3.Bucket;
   public readonly agents: Record<string, HarnessAgent> = {};
+  /**
+   * The reserved `report_chat` agent, when declared: answers end-user
+   * questions about a finished run's report (API chat route). Like the
+   * planner it is NOT a worker — the planner never sees it in the catalog.
+   */
+  public readonly reportChat?: HarnessAgent;
   public readonly workflow: AgenticWorkflow;
   public readonly scheduler: WorkflowScheduler;
   public readonly observability: ObservabilityPack;
@@ -168,6 +181,13 @@ export class AgenticFoundation extends Construct {
     const planner = this.agents['planner'];
     if (planner) {
       delete workers['planner'];
+    }
+    // Same convention for the report chat agent: it is invoked by the API
+    // over a finished report, never assigned plan tasks. It stays in
+    // this.agents so its prompt/model are seeded and admin-tunable.
+    this.reportChat = this.agents[REPORT_CHAT_AGENT_NAME];
+    if (this.reportChat) {
+      delete workers[REPORT_CHAT_AGENT_NAME];
     }
 
     this.workflow = new AgenticWorkflow(this, 'Workflow', {

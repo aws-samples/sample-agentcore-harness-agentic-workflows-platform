@@ -18,8 +18,8 @@ Built entirely from configuration over AWS CDK constructs: Amazon Bedrock AgentC
 |---|---|
 | Foundation CDK library | Typed, secure-by-default constructs that provision everything an agentic workload needs: agents, workflow engine, storage, scheduling, observability |
 | Planner-driven workflows | A goal becomes a structured task graph; one shared Step Functions state machine executes any plan with parallel fan-out, failure containment, and a final report step |
-| Workflow web app | Sign in, create workflows from goals, review and edit plans, manage schedules, watch runs, browse artifacts, tune agents at runtime |
-| Reference workload | A complete marketing-intelligence agent team for a fictional wine & beverages company — nine agents defined in one YAML file (`examples/marketing-workflow`) |
+| Workflow web app | Sign in, create workflows from goals, review and edit plans, manage schedules, watch runs, browse artifacts, tune agents at runtime — and ask the finished report questions or have it revised, with every edit reviewed section by section before it is saved as a new version |
+| Reference workload | A complete marketing-intelligence agent team for a fictional wine & beverages company — ten agents defined in one YAML file (`examples/marketing-workflow`) |
 
 ## Architecture
 
@@ -34,6 +34,7 @@ Built entirely from configuration over AWS CDK constructs: Amazon Bedrock AgentC
 5. Workers call tools through the AgentCore Gateway (MCP); API keys stay in Secrets Manager, never visible to agents.
 6. Every task output is persisted to S3 with a task record (status, timing, token usage) in DynamoDB.
 7. A report harness assembles all task outputs into the final artifact. Failed tasks are recorded, their dependents skipped with a reason, and the report notes the gaps — partial results beat total failure.
+8. Readers can then chat with the report. A dedicated `report_chat` harness answers only from the report and the task outputs behind it; when asked for changes it proposes section-scoped edits that the reader accepts or keeps per section, and each save becomes a new report version — the generated original is never overwritten.
 
 Plans are data, not infrastructure: agents are YAML entries, tools are gateway targets, and a new workload is one CDK construct call. The [technical guide](docs/technical-guide.md) covers how each piece works.
 
@@ -96,6 +97,7 @@ Useful context flags:
 - `-c removalPolicy=destroy` — **recommended for trials**: lets `cdk destroy` remove stateful resources later. Omit for production-like deployments.
 - `-c deepModelId=<id>` — optional but recommended: adds a deep-tier model for the planner and per-task assignment.
 - `-c fastModelId=<id>` — optional: adds a cheap tier to the per-task model menu.
+- `-c stackName=<name>` — optional: deploy under a different stack name. Needed when the same account already hosts this stack in another region: CloudFront resources are global and their generated names derive from the stack name, so a second `MarketingWorkflow` fails with "already exists".
 
 The deploy prints the outputs you need — web app URL, user pool id, API URL. List them anytime:
 
@@ -118,13 +120,15 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <UserPoolId> \
 
 ### 4. Run your first workflow
 
-The reference workload is a **marketing-intelligence agent team** for a fictional wine & beverages company: a planner, a portfolio expert, four research workers, a quantitative analyst, a campaign strategist, and a report writer — all nine defined in `examples/marketing-workflow/workload.yaml`. (The `product_expert` agent ships with a starter brief about the fictional portfolio; edit its prompt in Settings to match your own domain.)
+The reference workload is a **marketing-intelligence agent team** for a fictional wine & beverages company: a planner, a portfolio expert, four research workers, a quantitative analyst, a campaign strategist, a report writer, and a report assistant for readers — all ten defined in `examples/marketing-workflow/workload.yaml`. (The `product_expert` agent ships with a starter brief about the fictional portfolio; edit its prompt in Settings to match your own domain.)
 
 Open the `WebAppUrl` output, sign in, and create a workflow with a goal like:
 
 > *"Plan a spring campaign for our sparkling-wine brand in the Australian market: brand profile and target segment, current consumer sentiment, competitor activity, and social-channel compliance constraints. Deliver a campaign strategy."*
 
 Review the drafted plan, save, hit "run now", and watch per-task status, timing, and token usage on the run detail page. The report lands in the artifact browser. Attach a rate/cron schedule to make it recurring.
+
+Once the report is in, open the chat drawer on the run page and try *"Which sources support the sentiment verdict?"* or *"Halve the executive summary and turn the risks into a table."* Questions are answered from the report and its task outputs only; change requests come back as per-section diffs in the report itself, which you accept or keep one by one and then save as the next version.
 
 Full screenshot walkthrough: [`docs/webapp.md`](docs/webapp.md).
 
@@ -157,7 +161,8 @@ If you deployed with `-c removalPolicy=destroy`, this removes everything, includ
 ## Current scope and limitations (v1)
 
 - Single account, single region per deployment
-- Run status updates by polling (≤5 s); no WebSocket push
+- Run status updates by polling (≤5 s); no WebSocket push (report chat streams over server-sent events)
+- Report edits are section-scoped: the assistant replaces whole sections (or renames a heading), so line-level changes are reviewed as a section diff
 - Plan review is a structured form, not a visual DAG editor
 - Access control: authenticated users plus an `admin` group (no finer-grained RBAC)
 - Per-task `allowedTools` is enforced at validation/prompt level; service-side runtime enforcement is on the roadmap

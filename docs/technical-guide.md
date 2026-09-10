@@ -56,7 +56,7 @@ The platform is written once; each workload is stamped out from it via configura
 | Concern | What the workload provides |
 |---|---|
 | Stack composition | A `Stack` wiring the platform constructs together (e.g. `MarketingWorkflowStack`) |
-| Agent roster | `workload.yaml` (or TS configs): instructions, tools, memory, limits, thinking effort per agent. One agent named `planner` is auto-wired as the planning harness |
+| Agent roster | `workload.yaml` (or TS configs): instructions, tools, memory, limits, thinking effort per agent. Two names are reserved and never become workers: `planner` (the planning harness) and `report_chat` (grounded Q&A + section edits over a finished report, served by `POST /runs/{runId}/chat`) |
 | Gateway + tool selection | Its own `agentcore.Gateway`, which catalog targets to attach, secret names, per-Lambda memory |
 | Secret prefix | Namespace like `marketing-workflow/` — drives IAM scoping for that workload's tool Lambdas |
 | Model choices | `defaultModelId`, optional planner model (`plannerModelId`), optional `modelCatalog` for per-task assignment |
@@ -143,7 +143,17 @@ new AgenticFoundation(this, 'CompetitorSnapshot', {
 });
 ```
 
-That one construct provisions the KMS key, DynamoDB table, artifact bucket, harness agents, plan-interpreter state machine, scheduler, observability pack, and runtime-config seeds — all cost-tagged. An agent named `planner` is automatically wired as the planning harness; everything else becomes a worker the planner can assign tasks to.
+That one construct provisions the KMS key, DynamoDB table, artifact bucket, harness agents, plan-interpreter state machine, scheduler, observability pack, and runtime-config seeds — all cost-tagged. An agent named `planner` is automatically wired as the planning harness and one named `report_chat` as the report assistant (exposed as `foundation.reportChat`, invoked only by the API); everything else becomes a worker the planner can assign tasks to. Omit `report_chat` and the chat route answers 503 — the report worker is deliberately not reused for chat.
+
+### Report chat and edits
+
+`POST /runs/{runId}/chat` grounds the `report_chat` harness on the run's current report plus every succeeded task's output (character-budgeted), applies the same admin prompt/model overrides as workers, and returns the answer. The conversation lives in the web app's tools drawer beside the report; the transcript length is an org setting (Settings → Report chat, default 100 turns).
+
+When the user asks for a change, the agent plans every edit the request implies and proposes them all at once, one entry per affected section (an existing heading plus the raw-markdown replacement), which the API validates against the current report and drops per entry when it cannot apply. The web app then renders the whole report in review mode: each proposed section appears in place as a word-level diff with its own Accept / Keep current toggle, a sticky bar offers Accept all / Keep all current and Save, and nothing is written until Save. What a replacement stands in for is decided by its shape (`editTarget` in `plan-schema`): a bare heading line renames the section and keeps everything under it; a replacement without sub-headings edits the section's own text and keeps its sub-sections; one with sub-headings restructures that whole range. An edit that would keep under 30% of a section's words starts as Keep current with a warning, so large cuts are opted into per section (D-31).
+
+Saves go through `PUT /runs/{runId}/report`: the generated `report.md` is never overwritten — each save writes `report.v<n>.md`, appends to the run's `reportVersions`, moves `reportArtifactKey` to the newest, and rejects stale `baseVersion`s with a 409. Only the workflow owner or an admin can save.
+
+Chat answers stream. The web app posts to `/chat/runs/{runId}/chat` on its own CloudFront distribution; that behavior fronts an **AWS_IAM Lambda Function URL** with Origin Access Control, running the same grounding code with response streaming and server-sent events — because API Gateway HTTP API buffers responses and caps integrations at 29s, too short for a section rewrite (D-30). The URL is never public (a NONE-auth URL is stripped by account guardrails within minutes — live finding); CloudFront signs origin requests, and the handler still verifies the Cognito id token itself before any AWS call. The function is read-only and can invoke only the `report_chat` harness. `AgenticApi` exposes `chatStreamFunctionUrl` for stacks to mount the same way; the buffered `POST /runs/{runId}/chat` route remains the SPA's fallback when no `chatStreamUrl` is configured.
 
 `second-workload` deliberately uses inline TypeScript agent configs to show the typed alternative to `workload.yaml` — both surfaces validate against the same zod schema.
 

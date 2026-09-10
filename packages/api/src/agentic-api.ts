@@ -13,7 +13,7 @@
  */
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
-import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -31,6 +31,14 @@ export interface AgenticApiProps {
    * 'planner'. Required — the goal→plan flow is the API's core capability.
    */
   readonly planner?: HarnessAgent;
+  /**
+   * Harness serving POST /runs/{runId}/chat (grounded Q&A + section edits
+   * over a finished report). Default: the foundation's reserved
+   * `report_chat` agent. When neither exists, the chat route is disabled
+   * (503) — the report worker is deliberately NOT reused: it carries a
+   * heavyweight brief-writing prompt, model, and token cap.
+   */
+  readonly reportChat?: HarnessAgent;
   /** CORS origins for the SPA. Default: ['*'] (tighten per deployment). */
   readonly corsOrigins?: string[];
   /** Default: DESTROY — the pool holds demo users, not business data. */
@@ -67,6 +75,18 @@ export class AgenticApi extends Construct {
   public readonly userPoolClient: cognito.UserPoolClient;
   public readonly routerFunction: lambda.Function;
   public readonly plannerJobFunction: lambda.Function;
+  /** Streaming report chat (present only when a report_chat agent exists). */
+  public readonly chatStreamFunction?: lambda.Function;
+  /**
+   * The AWS_IAM response-streaming Function URL for POST /runs/{runId}/chat.
+   * Front it with CloudFront + Origin Access Control
+   * (`origins.FunctionUrlOrigin.withOriginAccessControl(...)`) so browsers
+   * can reach it; the SPA then calls it same-origin (D-30). Undefined
+   * without a report_chat agent.
+   */
+  public readonly chatStreamFunctionUrl?: lambda.FunctionUrl;
+  /** The raw URL of chatStreamFunctionUrl, for IAM-signing callers. */
+  public readonly chatStreamUrl?: string;
 
   constructor(scope: Construct, id: string, props: AgenticApiProps) {
     super(scope, id);
@@ -76,6 +96,12 @@ export class AgenticApi extends Construct {
     if (!planner) {
       throw new Error(
         'AgenticApi requires a planner harness: add an agent named "planner" to the foundation or pass props.planner',
+      );
+    }
+    const reportChat = props.reportChat ?? foundation.reportChat;
+    if (!reportChat) {
+      Annotations.of(this).addWarning(
+        'AgenticApi: no "report_chat" agent declared — the report chat route (POST /runs/{runId}/chat) will respond 503. Add an agent named "report_chat" to the workload to enable it.',
       );
     }
 
@@ -154,6 +180,9 @@ export class AgenticApi extends Construct {
         WORKER_HARNESS_MAP: workerMapJson,
         ...modelCatalogEnv,
         PLANNER_JOB_FUNCTION_NAME: this.plannerJobFunction.functionName,
+        ...(reportChat
+          ? { REPORT_CHAT_HARNESS_ARN: reportChat.harnessArn }
+          : {}),
         ...foundation.scheduler.runtimeEnvironment(),
       },
       description: 'Agentic API: workflow/schedule/run/artifact routes',
@@ -163,8 +192,16 @@ export class AgenticApi extends Construct {
       logRetention: logs.RetentionDays.THREE_MONTHS,
     });
     foundation.table.grantReadWriteData(this.routerFunction);
-    foundation.artifactsBucket.grantRead(this.routerFunction);
+    // Read: presigned artifact URLs + chat grounding. Write: report edits
+    // save new versions as artifacts/<wf>/<run>/report.v<n>.md (the handler
+    // enforces the prefix; the original report.md is never overwritten).
+    foundation.artifactsBucket.grantReadWrite(this.routerFunction);
     foundation.workflow.grantStartExecution(this.routerFunction);
+    // Report chat (POST /runs/{runId}/chat): the router synchronously
+    // invokes ONLY the dedicated report_chat harness (D-12 grant shape).
+    if (reportChat) {
+      reportChat.grantInvoke(this.routerFunction);
+    }
     // Zombie-run reconciliation (D-15): read-only on this SM's executions.
     foundation.workflow.stateMachine.grantExecution(
       this.routerFunction,
@@ -180,6 +217,55 @@ export class AgenticApi extends Construct {
         resources: ['*'],
       }),
     );
+
+    // ── Streaming chat (D-30) ───────────────────────────────────────────
+    // API Gateway HTTP API buffers Lambda responses and caps integrations at
+    // 29s; a section-edit proposal regularly needs 20–30s (live 500). A
+    // Lambda Function URL with RESPONSE_STREAM lifts the cap and streams
+    // tokens.
+    //
+    // Auth is layered. The URL itself is AWS_IAM: it is meant to sit behind
+    // a CloudFront distribution with Origin Access Control, which SigV4-signs
+    // every origin request (see examples/marketing-workflow deployWebapp —
+    // the SPA calls it same-origin at /chat/*). A NONE-auth URL was the first
+    // cut and was live-rejected: account guardrails strip the public
+    // InvokeFunctionUrl permission within minutes (D-30). Independently of
+    // IAM, the handler verifies the caller's Cognito id token (aws-jwt-verify
+    // against this pool + client) before any AWS call, so CloudFront reaching
+    // the function never means an anonymous browser can.
+    if (reportChat) {
+      this.chatStreamFunction = new lambda.Function(this, 'ChatStreamFn', {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromAsset(path.join(handlersRoot(), 'chat-stream')),
+        // Grounded answers + section rewrites; well under the 15m URL cap.
+        timeout: Duration.minutes(5),
+        memorySize: 512,
+        environment: {
+          TABLE_NAME: foundation.table.tableName,
+          BUCKET_NAME: foundation.artifactsBucket.bucketName,
+          REPORT_CHAT_HARNESS_ARN: reportChat.harnessArn,
+          USER_POOL_ID: this.userPool.userPoolId,
+          USER_POOL_CLIENT_ID: this.userPoolClient.userPoolClientId,
+        },
+        description: 'Agentic API: streaming report chat (Function URL, SSE)',
+        tracing: lambda.Tracing.ACTIVE,
+        logRetention: logs.RetentionDays.THREE_MONTHS,
+      });
+      // Read-only surface: run/task/config records, report + task artifacts,
+      // and invoke on the ONE chat harness. No writes — saves go via router.
+      foundation.table.grantReadData(this.chatStreamFunction);
+      foundation.artifactsBucket.grantRead(this.chatStreamFunction);
+      reportChat.grantInvoke(this.chatStreamFunction);
+      // No CORS block: the intended caller is CloudFront (same-origin for
+      // the SPA), and a direct IAM caller doesn't need it either.
+      this.chatStreamFunctionUrl = this.chatStreamFunction.addFunctionUrl({
+        authType: lambda.FunctionUrlAuthType.AWS_IAM,
+        invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
+      });
+      this.chatStreamUrl = this.chatStreamFunctionUrl.url;
+      new CfnOutput(this, 'ChatStreamUrl', { value: this.chatStreamUrl });
+    }
 
     // ── HTTP API ────────────────────────────────────────────────
     const issuer = `https://cognito-idp.${Stack.of(this).region}.amazonaws.com/${this.userPool.userPoolId}`;

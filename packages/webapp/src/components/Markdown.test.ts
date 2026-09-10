@@ -19,3 +19,14 @@ describe('Markdown strikethrough config', () => {
     expect(html).toContain('<del>$12</del>');
   });
 });
+
+describe('Markdown inline HTML for word-level diffs', () => {
+  it('passes <del>/<ins> through alongside surrounding markdown', () => {
+    // reportDiff.wordDiffMarkdown emits these; marked must keep them so the
+    // review view can highlight changed words inside rendered paragraphs.
+    const html = marked.parse('Revenue grew **<del>12</del><ins>14</ins>%** in Q2.', {
+      async: false,
+    }) as string;
+    expect(html).toContain('<strong><del>12</del><ins>14</ins>%</strong>');
+  });
+});

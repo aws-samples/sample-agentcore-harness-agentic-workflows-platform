@@ -54,6 +54,11 @@ export interface MarketingWorkflowStackProps extends StackProps {
    * Omit to run the planner on defaultModelId.
    */
   readonly plannerModelId?: string;
+  /**
+   * Model for the report_chat harness (grounded Q&A + section edits over a
+   * finished report — a light task). Omit to run it on defaultModelId.
+   */
+  readonly chatModelId?: string;
   /** Default RETAIN; tests/dev pass DESTROY. */
   readonly removalPolicy?: RemovalPolicy;
   /** Deploy the built webapp if its dist exists. Default: true. */
@@ -236,7 +241,9 @@ export class MarketingWorkflowStack extends Stack {
     const agents = manifest.map((agent) =>
       agent.name === 'planner' && props.plannerModelId
         ? { ...agent, modelId: props.plannerModelId }
-        : agent,
+        : agent.name === 'report_chat' && props.chatModelId
+          ? { ...agent, modelId: props.chatModelId }
+          : agent,
     );
     const foundation = new AgenticFoundation(this, 'Workload', {
       workloadName: 'marketing-workflow',
@@ -285,26 +292,101 @@ export class MarketingWorkflowStack extends Stack {
           cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
       },
       defaultRootObject: 'index.html',
-      // SPA rewrite is safe globally here: the API is a separate origin, so
-      // backend errors never pass through this distribution (serving the SPA
-      // and the API from one distribution would rewrite API errors to 200s).
+      // SPA rewrite: the JSON API is a separate origin, so its errors never
+      // pass through this distribution. The /chat/* behavior below IS a
+      // backend on this distribution, and custom error responses are
+      // distribution-wide, so a 404 from the chat handler (unknown run) or a
+      // 403 from a broken OAC handshake reaches the browser as 200 index.html
+      // (live-verified). 401/400/409/502 pass through intact. The SPA treats
+      // a non-SSE 200 as "streaming unavailable" and falls back to the
+      // buffered API route, which reports the real status.
       errorResponses: [
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
       ],
+      // Streaming chat (D-30): the AWS_IAM Function URL behind Origin Access
+      // Control — CloudFront SigV4-signs every origin request, so the URL is
+      // never public (NONE-auth URLs are stripped by account guardrails,
+      // live finding), and the SPA calls it same-origin at /chat/*, so no
+      // CORS. Caching off; forward everything but Host (the origin must see
+      // its own hostname for SigV4). readTimeout bounds the wait for the
+      // FIRST byte only — the handler sends an SSE comment immediately and
+      // keepalives while the model thinks, so long answers stream fine.
+      ...(api.chatStreamFunctionUrl
+        ? {
+            additionalBehaviors: {
+              '/chat/*': {
+                origin: origins.FunctionUrlOrigin.withOriginAccessControl(
+                  api.chatStreamFunctionUrl,
+                  { readTimeout: Duration.seconds(60) },
+                ),
+                allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+                cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+                originRequestPolicy:
+                  cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+              },
+            },
+          }
+        : {}),
     });
-    new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
+    // OAC for Lambda URLs needs BOTH permissions on the CloudFront principal
+    // (AWS docs: "Grant CloudFront permission to access the Lambda function
+    // URL"); CDK's FunctionUrlOrigin.withOriginAccessControl adds only
+    // InvokeFunctionUrl, and without InvokeFunction the origin answers 403
+    // before the handler runs (live finding, D-30).
+    if (api.chatStreamFunction) {
+      api.chatStreamFunction.addPermission('InvokeFromWebAppDistribution', {
+        principal: new iam.ServicePrincipal('cloudfront.amazonaws.com'),
+        action: 'lambda:InvokeFunction',
+        sourceArn: `arn:${this.partition}:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
+      });
+    }
+    // Two deployments so cache lifetimes match how Vite names files. Hashed
+    // assets (assets/index-<hash>.js) never change in place, so they are
+    // immutable for a year and old ones are kept — a tab opened before a
+    // deploy keeps working. The entry files (index.html, config.json) are
+    // what points at the current bundle, so they must never be served
+    // stale: without an explicit Cache-Control the browser applies
+    // heuristic freshness (~10% of the file's age) and can keep an old
+    // index.html for an hour after a deploy (live finding: a tab ran the
+    // previous bundle against the new API and rendered nothing).
+    const assetsDeploy = new s3deploy.BucketDeployment(this, 'WebAppAssetsDeploy', {
+      destinationBucket: siteBucket,
+      sources: [s3deploy.Source.asset(webappDist)],
+      exclude: ['*'],
+      include: ['assets/*'],
+      prune: false,
+      cacheControl: [
+        s3deploy.CacheControl.maxAge(Duration.days(365)),
+        s3deploy.CacheControl.immutable(),
+      ],
+    });
+    const webAppDeploy = new s3deploy.BucketDeployment(this, 'WebAppDeploy', {
       destinationBucket: siteBucket,
       distribution,
+      exclude: ['assets/*'],
+      cacheControl: [
+        s3deploy.CacheControl.noCache(),
+        s3deploy.CacheControl.mustRevalidate(),
+      ],
       sources: [
         s3deploy.Source.asset(webappDist),
         s3deploy.Source.jsonData('config.json', {
           apiUrl: api.httpApi.apiEndpoint,
           region: this.region,
           userPoolClientId: api.userPoolClient.userPoolClientId,
+          // Streaming chat (D-30): same-origin path on this distribution
+          // (the /chat/* behavior above). The SPA falls back to the buffered
+          // API route when absent.
+          ...(api.chatStreamFunctionUrl ? { chatStreamUrl: '/chat' } : {}),
         }),
       ],
     });
+    // Entry files go live only after the hashed bundle they reference exists;
+    // the two deployments are otherwise independent custom resources and
+    // CloudFormation may finish them in either order.
+    webAppDeploy.node.addDependency(assetsDeploy);
     new CfnOutput(this, 'WebAppUrl', {
       value: `https://${distribution.distributionDomainName}`,
     });

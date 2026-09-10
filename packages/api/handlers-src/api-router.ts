@@ -12,7 +12,12 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   DescribeExecutionCommand,
@@ -31,14 +36,26 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { randomUUID } from 'node:crypto';
 import {
   LIST_INDEX_NAME,
+  artifactKeys,
   parsePlanDocument,
   tableKeys,
   validatePlanAgainstCatalog,
+  type ReportVersion,
 } from '@agentic-platform/plan-schema';
 import {
   loadDeployedWorkerCatalog,
   loadEffectiveModelCatalog,
 } from '@agentic-platform/constructs/dist/handlers-src/lib/runtime-config';
+import { invokeHarnessText } from '@agentic-platform/constructs/dist/handlers-src/lib/planner-client';
+import {
+  chatInvocationArgs,
+  finalChatPayload,
+  harnessErrorMessage,
+  loadChatContext,
+  loadChatMaxTurns,
+  reportVersionsOf,
+  turnLimitError,
+} from './lib/report-chat';
 import { ddb, nowIso, requireEnv } from './lib/common';
 import { checkModelIds } from './lib/model-catalog-check';
 import {
@@ -56,9 +73,11 @@ import { matchRoute } from '../src/routing';
 import {
   artifactKeyBelongsToRun,
   isValidScheduleExpression,
+  validateChatReport,
   validateCreateWorkflow,
   validatePutAgentConfig,
   validatePutOrgSettings,
+  validatePutReport,
   validateUpdateWorkflow,
 } from '../src/validation';
 
@@ -103,6 +122,10 @@ export async function handler(event: HttpEvent): Promise<HttpResponse> {
         return await getRun(match.params.runId!);
       case 'getArtifactUrl':
         return await getArtifactUrl(match.params.runId!, event);
+      case 'chatAboutReport':
+        return await chatAboutReport(match.params.runId!, event);
+      case 'putReport':
+        return await putReport(match.params.runId!, event);
       case 'getSettings':
         return await getSettings(event);
       case 'putAgentConfig':
@@ -492,7 +515,11 @@ async function putAgentConfig(
   return json(200, { name: agentName, ...patch });
 }
 
-/** Admin: set/clear org-wide settings (model catalog override). */
+/**
+ * Admin: set/clear org-wide settings. Tri-state per field (model catalog
+ * override, report-chat turn limit): absent = untouched, null = restore
+ * default, value = set. One UpdateItem applies the whole patch.
+ */
 async function putOrgSettings(event: HttpEvent): Promise<HttpResponse> {
   if (!isAdmin(event)) {
     return forbidden('admin group membership required to edit org settings');
@@ -501,14 +528,22 @@ async function putOrgSettings(event: HttpEvent): Promise<HttpResponse> {
   if (!validated.ok) {
     return badRequest(validated.error);
   }
-  const clears = validated.value.modelCatalog === null;
+  const patch = validated.value;
+  const sets = ['entity = :entity', 'updatedAt = :now', 'updatedBy = :by'];
+  const removes: string[] = [];
+  const values: Record<string, unknown> = {
+    ':entity': 'ORG_SETTINGS',
+    ':now': nowIso(),
+    ':by': callerId(event) ?? 'unknown',
+  };
+
   // D-20: an invalid id only surfaces at run time as a harness
   // RuntimeClientError, so verify against Bedrock in-region at save time.
-  let verified = false;
-  if (!clears) {
-    const check = await checkModelIds(
-      validated.value.modelCatalog!.map((entry) => entry.modelId),
-    );
+  let verified: boolean | undefined;
+  if (patch.modelCatalog === null) {
+    removes.push('modelCatalog');
+  } else if (patch.modelCatalog) {
+    const check = await checkModelIds(patch.modelCatalog.map((entry) => entry.modelId));
     if (check.invalid.length > 0) {
       return json(400, {
         error:
@@ -517,27 +552,33 @@ async function putOrgSettings(event: HttpEvent): Promise<HttpResponse> {
       });
     }
     verified = check.verified;
+    sets.push('modelCatalog = :catalog');
+    values[':catalog'] = patch.modelCatalog;
   }
+
+  if (patch.chatMaxTurns === null) {
+    removes.push('chatMaxTurns');
+  } else if (patch.chatMaxTurns !== undefined) {
+    sets.push('chatMaxTurns = :chatMaxTurns');
+    values[':chatMaxTurns'] = patch.chatMaxTurns;
+  }
+
   await ddb.send(
     new UpdateCommand({
       TableName: requireEnv('TABLE_NAME'),
       Key: tableKeys.orgSettings(),
-      UpdateExpression: clears
-        ? 'REMOVE modelCatalog SET entity = :entity, updatedAt = :now, updatedBy = :by'
-        : 'SET entity = :entity, modelCatalog = :catalog, updatedAt = :now, updatedBy = :by',
-      ExpressionAttributeValues: {
-        ':entity': 'ORG_SETTINGS',
-        ':now': nowIso(),
-        ':by': callerId(event) ?? 'unknown',
-        ...(clears ? {} : { ':catalog': validated.value.modelCatalog }),
-      },
+      UpdateExpression: `SET ${sets.join(', ')}${
+        removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : ''
+      }`,
+      ExpressionAttributeValues: values,
     }),
   );
   return json(200, {
-    modelCatalog: validated.value.modelCatalog,
+    ...(patch.modelCatalog !== undefined ? { modelCatalog: patch.modelCatalog } : {}),
+    ...(patch.chatMaxTurns !== undefined ? { chatMaxTurns: patch.chatMaxTurns } : {}),
     // False when Bedrock listing was unavailable and the save proceeded
     // unverified — the UI can surface a caution.
-    verified: clears ? undefined : verified,
+    ...(verified !== undefined ? { verified } : {}),
   });
 }
 
@@ -897,6 +938,181 @@ async function getArtifactUrl(
     { expiresIn: PRESIGN_TTL_SECONDS },
   );
   return json(200, { url, expiresInSeconds: PRESIGN_TTL_SECONDS });
+}
+
+/**
+ * Chat over a run's report (POST /runs/{runId}/chat). The dedicated
+ * `report_chat` harness answers using ONLY the report and the specialist task
+ * outputs it was built from, both injected into the request; it may also
+ * return one section-scoped edit proposal (see lib/report-chat.ts).
+ *
+ * Synchronous (single bounded invocation fits the 29s router budget) and
+ * stateless on the wire: the client sends the whole transcript; one runtime
+ * session per run gives the harness native turn memory too. Admin prompt /
+ * model overrides from Settings apply exactly as they do for workers
+ * (D-19), so the chat prompt is tunable without a deploy. Reads are open to
+ * every signed-in user (shared-workspace model, matching getRun); saving an
+ * edit is a separate owner-or-admin route (putReport).
+ */
+async function chatAboutReport(
+  runId: string,
+  event: HttpEvent,
+): Promise<HttpResponse> {
+  const validated = validateChatReport(parseBody(event));
+  if (!validated.ok) {
+    return badRequest(validated.error);
+  }
+  const harnessArn = process.env.REPORT_CHAT_HARNESS_ARN;
+  if (!harnessArn) {
+    return json(503, {
+      error:
+        'report chat is not enabled for this deployment — add an agent named "report_chat" to the workload',
+    });
+  }
+  const tableName = requireEnv('TABLE_NAME');
+  const maxTurns = await loadChatMaxTurns(tableName);
+  if (validated.value.messages.length > maxTurns) {
+    return badRequest(turnLimitError(maxTurns));
+  }
+  const loaded = await loadChatContext({
+    tableName,
+    bucketName: requireEnv('BUCKET_NAME'),
+    runId,
+  });
+  if (!loaded.ok) {
+    return json(loaded.status, { error: loaded.error });
+  }
+  try {
+    const raw = await invokeHarnessText(
+      chatInvocationArgs(harnessArn, loaded.context, validated.value.messages),
+    );
+    return json(200, finalChatPayload(raw, loaded.context));
+  } catch (error) {
+    console.error('chatAboutReport: harness invocation failed', { runId, error });
+    return json(502, { error: harnessErrorMessage(error) });
+  }
+}
+
+/**
+ * Save an edited report as a new version (PUT /runs/{runId}/report).
+ * Owner-or-admin of the run's workflow (mutation, like savePlan). The
+ * original report.md is never overwritten: v2, v3, … are separate objects
+ * under the run's artifact prefix, the run's reportVersions list grows, and
+ * reportArtifactKey moves to the newest. `baseVersion` gives optimistic
+ * concurrency: a stale editor gets a 409 instead of clobbering a newer save.
+ */
+async function putReport(runId: string, event: HttpEvent): Promise<HttpResponse> {
+  const validated = validatePutReport(parseBody(event));
+  if (!validated.ok) {
+    return badRequest(validated.error);
+  }
+  const tableName = requireEnv('TABLE_NAME');
+  const run = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.run(runId) }),
+  );
+  if (!run.Item) {
+    return notFound(`run ${runId}`);
+  }
+  const workflowId = String(run.Item.workflowId ?? '');
+  const meta = await ddb.send(
+    new GetCommand({ TableName: tableName, Key: tableKeys.workflowMeta(workflowId) }),
+  );
+  if (!meta.Item) {
+    return notFound(`workflow ${workflowId}`);
+  }
+  const denied = requireOwnerOrAdmin(event, meta.Item, 'edit this report');
+  if (denied) {
+    return denied;
+  }
+  if (typeof run.Item.reportArtifactKey !== 'string') {
+    return json(409, { error: 'this run has no report to edit yet' });
+  }
+  const versions = reportVersionsOf(run.Item);
+  const latest = versions[versions.length - 1]!;
+  if (validated.value.baseVersion !== latest.version) {
+    return json(409, {
+      error: `report has changed since you started editing (you edited v${validated.value.baseVersion}, latest is v${latest.version}) — reload and reapply your changes`,
+      latestVersion: latest.version,
+    });
+  }
+  const version = latest.version + 1;
+  const artifactKey = artifactKeys.reportVersion(workflowId, runId, version);
+  const bucket = requireEnv('BUCKET_NAME');
+  // The version key is deterministic, so two editors saving from the same
+  // base both target report.v<n>.md. The DynamoDB write below is conditional,
+  // but a plain PutObject is not: the loser's bytes could overwrite the
+  // winner's object before the winner's record update lands. IfNoneMatch: '*'
+  // makes the object write conditional too (S3 returns 412 for the second
+  // writer), so the same 409 the record guard produces applies here.
+  const stored = await s3
+    .send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: artifactKey,
+        Body: validated.value.markdown,
+        ContentType: 'text/markdown; charset=utf-8',
+        IfNoneMatch: '*',
+      }),
+    )
+    .then(() => true)
+    .catch((error: unknown) => {
+      const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (failure.name === 'PreconditionFailed' || failure.$metadata?.httpStatusCode === 412) {
+        return false;
+      }
+      throw error;
+    });
+  if (!stored) {
+    return json(409, {
+      error: 'report changed concurrently — reload and reapply your changes',
+    });
+  }
+  const entry: ReportVersion = {
+    version,
+    artifactKey,
+    savedAt: nowIso(),
+    savedBy: callerId(event) ?? 'unknown',
+    ...(validated.value.note ? { note: validated.value.note } : {}),
+  };
+  const updated = await ddb.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: tableKeys.run(runId),
+      UpdateExpression:
+        'SET reportArtifactKey = :key, reportVersions = :versions',
+      // Guard the write too: only advance from the version we read.
+      ConditionExpression: 'reportArtifactKey = :expectedKey',
+      ExpressionAttributeValues: {
+        ':key': artifactKey,
+        ':versions': [...versions, entry],
+        ':expectedKey': latest.artifactKey,
+      },
+      ReturnValues: 'ALL_NEW',
+    }),
+  ).catch((error: unknown) => {
+    if ((error as { name?: string }).name === 'ConditionalCheckFailedException') {
+      return undefined;
+    }
+    throw error;
+  });
+  if (!updated) {
+    // The record moved on under us; the object we just wrote belongs to no
+    // version, so remove it rather than leave an orphan. Best effort: a
+    // failed cleanup must not mask the 409 the caller needs.
+    await s3
+      .send(new DeleteObjectCommand({ Bucket: bucket, Key: artifactKey }))
+      .catch((error: unknown) => {
+        console.warn('putReport: orphan cleanup failed', { runId, artifactKey, error });
+      });
+    return json(409, {
+      error: 'report changed concurrently — reload and reapply your changes',
+    });
+  }
+  return json(200, {
+    version: entry,
+    reportArtifactKey: artifactKey,
+    reportVersions: [...versions, entry],
+  });
 }
 
 function publicWorkflow(item: Record<string, unknown>): Record<string, unknown> {

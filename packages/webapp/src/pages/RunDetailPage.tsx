@@ -4,7 +4,7 @@
  * and an inline artifact viewer with markdown rendering and .md download.
  * Polls every 5s while running.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
@@ -19,7 +19,9 @@ import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
 import { api, type RunDetail, type TaskView } from '../api';
+import { isAdminUser, tokenClaims } from '../auth';
 import Markdown from '../components/Markdown';
+import ReportWorkspace from '../components/ReportWorkspace';
 import { RunStatus, TaskStatus } from '../components/status';
 import { durationBetween, formatCount, formatDateTime } from '../format';
 import { useRecordVisit } from '../recents';
@@ -38,8 +40,10 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [workflowName, setWorkflowName] = useState<string | null>(null);
+  const [workflowOwner, setWorkflowOwner] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [artifact, setArtifact] = useState<ArtifactState | null>(null);
+  const reportRef = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async () => {
     const result = await api.getRun(runId);
@@ -79,7 +83,10 @@ export default function RunDetailPage() {
     api
       .getWorkflow(run.workflowId)
       .then((result) => {
-        if (!cancelled) setWorkflowName(result.workflow.name);
+        if (!cancelled) {
+          setWorkflowName(result.workflow.name);
+          setWorkflowOwner(result.workflow.createdBy);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -154,7 +161,19 @@ export default function RunDetailPage() {
   const workers = tasks.filter((task) => task.taskId !== '__report');
   const report = tasks.find((task) => task.taskId === '__report');
   const orderedTasks = report ? [...workers, report] : workers;
-  const reportKey = report?.artifactKey ?? run.reportArtifactKey;
+  // The run record's key tracks the LATEST version (user edits move it);
+  // the report task record only ever knows the generated original.
+  const reportKey = run.reportArtifactKey ?? report?.artifactKey;
+  // Owner-or-admin mirrors the API's rule for saving report edits (UX
+  // gating only — the server enforces it).
+  const claims = tokenClaims();
+  const me = claims?.['cognito:username'] ?? claims?.sub;
+  const canEdit =
+    isAdminUser() || (typeof me === 'string' && !!workflowOwner && me === workflowOwner);
+
+  function showReport() {
+    reportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   const finished = tasks.filter((task) =>
     ['succeeded', 'failed', 'skipped'].includes(task.status),
@@ -185,7 +204,7 @@ export default function RunDetailPage() {
                 variant="primary"
                 disabled={!reportKey}
                 disabledReason="The report artifact isn't available yet."
-                onClick={() => reportKey && void openArtifact(reportKey)}
+                onClick={showReport}
               >
                 View report
               </Button>
@@ -284,12 +303,16 @@ export default function RunDetailPage() {
               id: 'output',
               header: 'Output',
               cell: (task) =>
-                task.artifactKey ? (
+                task.taskId === '__report' && reportKey ? (
+                  <Button variant="inline-link" onClick={showReport}>
+                    View report
+                  </Button>
+                ) : task.artifactKey ? (
                   <Button
                     variant="inline-link"
                     onClick={() => void openArtifact(task.artifactKey!)}
                   >
-                    {task.taskId === '__report' ? 'View report' : 'View'}
+                    View
                   </Button>
                 ) : (
                   '—'
@@ -331,6 +354,18 @@ export default function RunDetailPage() {
               <Markdown text={artifact.text} />
             )}
           </Container>
+        )}
+
+        {reportKey && (
+          <div ref={reportRef}>
+            <ReportWorkspace
+              runId={runId}
+              reportArtifactKey={reportKey}
+              reportVersions={run.reportVersions}
+              canEdit={canEdit}
+              onSaved={() => void refresh().catch(() => undefined)}
+            />
+          </div>
         )}
       </SpaceBetween>
     </ContentLayout>

@@ -25,6 +25,10 @@ const fastModelId =
 const deepModelId =
   (app.node.tryGetContext('deepModelId') as string | undefined) ??
   process.env.MARKETING_DEEP_MODEL_ID;
+const chatModelId =
+  (app.node.tryGetContext('chatModelId') as string | undefined) ??
+  process.env.MARKETING_CHAT_MODEL_ID ??
+  fastModelId;
 const modelCatalog =
   fastModelId || deepModelId
     ? [
@@ -68,7 +72,14 @@ const region =
   (app.node.tryGetContext('region') as string | undefined) ??
   process.env.CDK_DEFAULT_REGION ??
   'ap-southeast-2';
-new MarketingWorkflowStack(app, 'MarketingWorkflow', {
+// Optional: -c stackName=<name> when the same account already hosts this
+// stack in another region. CloudFront resources (OriginAccessControl) are
+// global and their generated names derive from the stack name, so two
+// same-named stacks in one account collide with "already exists".
+const stackName =
+  (app.node.tryGetContext('stackName') as string | undefined) ??
+  'MarketingWorkflow';
+new MarketingWorkflowStack(app, stackName, {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region,
@@ -78,6 +89,9 @@ new MarketingWorkflowStack(app, 'MarketingWorkflow', {
   // Plan quality drives every downstream task: run the planner on the
   // deep-tier model whenever one is provided.
   ...(deepModelId ? { plannerModelId: deepModelId } : {}),
+  // Report chat is a light grounded-answer task: `-c chatModelId=…` pins it
+  // explicitly; otherwise it follows the fast tier when one is provided.
+  ...(chatModelId ? { chatModelId } : {}),
   // Optional: -c alarmEmail=<address> subscribes to the workload alarms.
   ...((app.node.tryGetContext('alarmEmail') as string | undefined)
     ? { alarmEmail: app.node.tryGetContext('alarmEmail') as string }

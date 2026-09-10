@@ -7,6 +7,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -22,10 +23,12 @@ import Flashbar, { type FlashbarProps } from '@cloudscape-design/components/flas
 import SideNavigation, {
   type SideNavigationProps,
 } from '@cloudscape-design/components/side-navigation';
+import TextContent from '@cloudscape-design/components/text-content';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
 import { isDarkMode, setDarkMode } from '../appearance';
 import { displayName, signOut } from '../auth';
 import { useRecents } from '../recents';
+import { watchForNewBundle } from '../version';
 
 export interface FlashMessage {
   type: 'success' | 'error' | 'info' | 'warning';
@@ -38,7 +41,18 @@ interface ShellApi {
   setBreadcrumbs: (items: BreadcrumbGroupProps.Item[]) => void;
   /** Push a flash notification; successes auto-dismiss after 5 s. */
   notify: (message: FlashMessage) => void;
+  /**
+   * Mount a page-scoped panel in the AppLayout tools drawer (right side,
+   * stays put while content scrolls). Pass null to remove it; pages must
+   * clear it on unmount. The drawer toggle appears only while a panel is set.
+   */
+  setTools: (panel: ReactNode | null) => void;
+  /** Programmatically open the tools drawer (e.g. when seeding a prompt). */
+  openTools: () => void;
 }
+
+const TOOLS_OPEN_KEY = 'agentic.toolsOpen';
+const TOOLS_DRAWER_ID = 'report-assistant';
 
 const ShellContext = createContext<ShellApi | null>(null);
 
@@ -72,6 +86,16 @@ export default function AppShell() {
   const [breadcrumbs, setBreadcrumbsState] = useState<BreadcrumbGroupProps.Item[]>([]);
   const [flashItems, setFlashItems] = useState<FlashbarProps.MessageDefinition[]>([]);
   const flashId = useRef(0);
+  const [tools, setToolsState] = useState<ReactNode | null>(null);
+  // Remembered per browser; default open so the panel is discoverable the
+  // first time a page offers one.
+  const [toolsOpen, setToolsOpenState] = useState<boolean>(
+    () => localStorage.getItem(TOOLS_OPEN_KEY) !== 'false',
+  );
+  const setToolsOpen = useCallback((open: boolean) => {
+    setToolsOpenState(open);
+    localStorage.setItem(TOOLS_OPEN_KEY, String(open));
+  }, []);
 
   const dismissFlash = useCallback((id: string) => {
     setFlashItems((current) => current.filter((item) => item.id !== id));
@@ -106,7 +130,33 @@ export default function AppShell() {
     setBreadcrumbsState([{ text: 'Agentic Workflows', href: '/' }, ...items]);
   }, []);
 
-  const shellApi = useMemo<ShellApi>(() => ({ setBreadcrumbs, notify }), [setBreadcrumbs, notify]);
+  // A tab left open across a deploy runs old client code against the new
+  // API. Offer a reload (sticky, not dismissible: the problem persists until
+  // they do) rather than letting the mismatch surface as odd behavior.
+  useEffect(
+    () =>
+      watchForNewBundle(() => {
+        setFlashItems((current) => [
+          {
+            id: 'new-version',
+            type: 'info',
+            header: 'A new version of this app is available',
+            content: 'Reload to pick it up. Unsaved edits in the report editor will be lost.',
+            buttonText: 'Reload',
+            onButtonClick: () => window.location.reload(),
+          },
+          ...current.filter((item) => item.id !== 'new-version'),
+        ]);
+      }),
+    [],
+  );
+
+  const setTools = useCallback((panel: ReactNode | null) => setToolsState(panel), []);
+  const openTools = useCallback(() => setToolsOpen(true), [setToolsOpen]);
+  const shellApi = useMemo<ShellApi>(
+    () => ({ setBreadcrumbs, notify, setTools, openTools }),
+    [setBreadcrumbs, notify, setTools, openTools],
+  );
 
   const navItems = useMemo<SideNavigationProps['items']>(() => {
     const items: SideNavigationProps.Item[] = [
@@ -174,6 +224,30 @@ export default function AppShell() {
       <AppLayout
         headerSelector="#app-top-nav"
         toolsHide
+        // A custom drawer rather than the `tools` slot: `tools` is hard-wired
+        // to the "i" info icon, while drawers take their own trigger icon
+        // (the chat bubble) and are user-resizable.
+        drawers={
+          tools === null
+            ? []
+            : [
+                {
+                  id: TOOLS_DRAWER_ID,
+                  content: <TextContent>{tools}</TextContent>,
+                  trigger: { iconName: 'contact' },
+                  resizable: true,
+                  defaultSize: 420,
+                  ariaLabels: {
+                    drawerName: 'Report assistant',
+                    triggerButton: 'Open report assistant',
+                    closeButton: 'Close report assistant',
+                    resizeHandle: 'Resize report assistant',
+                  },
+                },
+              ]
+        }
+        activeDrawerId={tools !== null && toolsOpen ? TOOLS_DRAWER_ID : null}
+        onDrawerChange={({ detail }) => setToolsOpen(detail.activeDrawerId === TOOLS_DRAWER_ID)}
         navigationOpen={navigationOpen}
         onNavigationChange={({ detail }) => setNavigationOpen(detail.open)}
         ariaLabels={{
@@ -181,6 +255,7 @@ export default function AppShell() {
           navigationToggle: 'Open navigation',
           navigationClose: 'Close navigation',
           notifications: 'Notifications',
+          drawers: 'Panels',
         }}
         navigation={
           <SideNavigation

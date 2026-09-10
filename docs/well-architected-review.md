@@ -141,6 +141,8 @@ architecture posture.
 | Secret isolation | tool Lambdas, gateway | One secret per tool role (`marketing-workflow/<key>-*` exact-match ARNs); secrets never in agent configs or agent-readable env |
 | No runtime control plane | all runtime roles | IAM guard tests assert no `CreateHarness`/`CreateRole`/`CreateStateMachine` |
 | Token storage | `webapp/auth.ts` | `sessionStorage` (not `localStorage`); expiry enforced client-side; no refresh-token persistence |
+| Streaming chat endpoint is never public | `AgenticApi` chat-stream Function URL + `chat-stream.ts` | URL auth is `AWS_IAM`; only the SPA's CloudFront distribution may invoke it (OAC SigV4, resource policy scoped to that distribution ARN — a NONE-auth first cut was stripped by account guardrails within minutes, D-30); the handler independently verifies the Cognito id token (`aws-jwt-verify`, pool + client id) before any AWS call; function role is read-only plus invoke on the single `report_chat` harness — saves go through the authorizer-guarded router |
+| Report edits are reviewed, versioned, and scoped | `report-chat.ts`, `report-sections.ts`, `PUT /runs/{id}/report` | Every proposal is validated against the current report and applied only on an explicit owner/admin save; each save is a new `report.v<n>.md` (the generated original is immutable) with `savedBy`, and a stale `baseVersion` is rejected with 409; no unfenced-prose inference of edits (removed after it absorbed chat text into a saved report, D-31) |
 | Repo hygiene | git | No hardcoded credentials in tracked files (pattern scan); `cdk.out` untracked |
 
 ### SEC-L4 · Tenancy is owner-or-admin on mutations, open on reads
@@ -211,7 +213,13 @@ the CI pipeline (shortlist item 4).
 deep-model inference. Owner-gating (see remediation log) limits who can
 trigger spend, but a single compromised owner/admin account can still
 generate unbounded spend: no WAF, no route throttling. Rate-limit these
-routes and alarm on drafting/run rates.
+routes and alarm on drafting/run rates. The report chat (`POST
+/runs/*/chat` and its streaming twin at `/chat/*` on the SPA distribution)
+is open to every signed-in user by design and each turn re-sends the whole
+transcript plus a character-budgeted report and task outputs to the
+`report_chat` model; the org-level turn limit (default 100, hard cap 500)
+bounds prompt size per conversation but not the number of conversations —
+include both chat paths in the same throttling and alarms.
 
 ### SEC-L1 · Broad `bedrock:InvokeModel` grant
 

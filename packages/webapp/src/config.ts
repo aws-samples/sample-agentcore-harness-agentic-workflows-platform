@@ -6,6 +6,11 @@ export interface AppConfig {
   apiUrl: string;
   region: string;
   userPoolClientId: string;
+  /**
+   * Response-streaming Function URL for report chat (D-30). Optional: when
+   * absent the app uses the buffered API route.
+   */
+  chatStreamUrl?: string;
 }
 
 let cached: Promise<AppConfig> | null = null;
@@ -28,12 +33,13 @@ export function loadConfig(): Promise<AppConfig> {
       const apiUrl = env.VITE_API_URL as string | undefined;
       const region = env.VITE_AWS_REGION as string | undefined;
       const userPoolClientId = env.VITE_USER_POOL_CLIENT_ID as string | undefined;
+      const chatStreamUrl = env.VITE_CHAT_STREAM_URL as string | undefined;
       if (!apiUrl || !region || !userPoolClientId) {
         throw new Error(
           'Missing app configuration: provide /config.json or VITE_API_URL, VITE_AWS_REGION, VITE_USER_POOL_CLIENT_ID',
         );
       }
-      return { apiUrl, region, userPoolClientId };
+      return { apiUrl, region, userPoolClientId, ...(chatStreamUrl ? { chatStreamUrl } : {}) };
     })();
   }
   return cached;

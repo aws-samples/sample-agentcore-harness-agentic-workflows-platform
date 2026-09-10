@@ -82,6 +82,23 @@ export const TaskRecordSchema = z.object({
 });
 export type TaskRecord = z.infer<typeof TaskRecordSchema>;
 
+/**
+ * One saved revision of a run's report. Version 1 is the interpreter's
+ * original `report.md` (immutable); later versions are user edits saved via
+ * the API, each as its own S3 object. `reportArtifactKey` on the run always
+ * points at the latest version.
+ */
+export const ReportVersionSchema = z.object({
+  version: z.number().int().min(1),
+  artifactKey: z.string().min(1),
+  savedAt: z.string(),
+  /** Caller id for user edits; absent on the generated original. */
+  savedBy: z.string().optional(),
+  /** Short change note (e.g. the chat proposal's rationale). */
+  note: z.string().max(512).optional(),
+});
+export type ReportVersion = z.infer<typeof ReportVersionSchema>;
+
 export const RunRecordSchema = z.object({
   runId: z.string().min(1),
   workflowId: z.string().min(1),
@@ -94,7 +111,13 @@ export const RunRecordSchema = z.object({
   /** Completed execution passes (retry-run bumps it per retry). */
   attempts: z.number().int().min(1).optional(),
   tokens: TokenUsageSchema.optional(),
+  /** Latest report version's key (the original until a user edit is saved). */
   reportArtifactKey: z.string().optional(),
+  /**
+   * Edit history, oldest first. Absent until the first user edit; readers
+   * treat a missing list as [{ version: 1, artifactKey: reportArtifactKey }].
+   */
+  reportVersions: z.array(ReportVersionSchema).optional(),
   sfnExecutionArn: z.string().optional(),
   startedAt: z.string(),
   finishedAt: z.string().optional(),
@@ -156,6 +179,10 @@ export type AgentConfigRecord = z.infer<typeof AgentConfigRecordSchema>;
  * Organization-wide settings (admin-editable). Absent fields fall back to
  * the deployed defaults (e.g. the MODEL_CATALOG environment).
  */
+/** Report chat conversation-length bounds (turns = user + assistant messages). */
+export const CHAT_MAX_TURNS_DEFAULT = 100;
+export const CHAT_MAX_TURNS_LIMIT = 500;
+
 export const OrgSettingsRecordSchema = z.object({
   /** Replaces the deployed model catalog for planner model assignment. */
   modelCatalog: z
@@ -167,6 +194,12 @@ export const OrgSettingsRecordSchema = z.object({
     )
     .max(16)
     .optional(),
+  /**
+   * Longest conversation the report chat accepts, in turns. Absent = the
+   * platform default (CHAT_MAX_TURNS_DEFAULT). The client re-sends the whole
+   * transcript each turn, so this bounds prompt size and cost.
+   */
+  chatMaxTurns: z.number().int().min(1).max(CHAT_MAX_TURNS_LIMIT).optional(),
   updatedAt: z.string().optional(),
   updatedBy: z.string().optional(),
 });
@@ -234,4 +267,7 @@ export const artifactKeys = {
     `artifacts/${workflowId}/${runId}/${taskId}/output.md`,
   report: (workflowId: string, runId: string) =>
     `artifacts/${workflowId}/${runId}/report.md`,
+  /** User-edited report revisions (version ≥ 2); v1 is `report`. */
+  reportVersion: (workflowId: string, runId: string, version: number) =>
+    `artifacts/${workflowId}/${runId}/report.v${version}.md`,
 } as const;
