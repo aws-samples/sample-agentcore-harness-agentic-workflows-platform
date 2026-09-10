@@ -118,7 +118,8 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
   // Chat (state lives here so the drawer panel is pure props and survives
   // the drawer element being re-set on every render).
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [chatDraft, setChatDraft] = useState('');
+  /** Prefill for the chat input (the panel owns the draft itself — see ChatPanel). */
+  const [chatSeed, setChatSeed] = useState<{ text: string; nonce: number } | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [answeredVersion, setAnsweredVersion] = useState<number | null>(null);
@@ -276,18 +277,19 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
 
   /** "Ask about this section": seed the prompt and open the drawer. */
   function askAboutSection(heading: string) {
-    setChatDraft(`About "${sectionTitle(heading)}": `);
+    setChatSeed((current) => ({
+      text: `About "${sectionTitle(heading)}": `,
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
     shell.openTools();
   }
 
-  const sendChat = useCallback(async () => {
-    const question = chatDraft.trim();
+  const sendChat = useCallback(async (question: string) => {
     if (!question || chatBusy) {
       return;
     }
     const history: ChatMessage[] = [...messages, { role: 'user', content: question }];
     setMessages(history);
-    setChatDraft('');
     setChatError(null);
     setStreaming('');
     setDrafting(null);
@@ -322,7 +324,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
       setChatBusy(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatDraft, chatBusy, messages, runId, loaded]);
+  }, [chatBusy, messages, runId, loaded]);
 
   // Mount the chat in the tools drawer; clear it when this page goes away.
   useEffect(() => {
@@ -330,7 +332,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
       <ChatPanel
         canEdit={canEdit}
         messages={messages}
-        draft={chatDraft}
+        seed={chatSeed}
         busy={chatBusy || saving}
         error={chatError}
         streaming={streaming}
@@ -340,8 +342,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
         currentText={loaded?.text ?? null}
         applied={applied}
         reviewing={review?.messageIndex ?? null}
-        onDraftChange={setChatDraft}
-        onSend={() => void sendChat()}
+        onSend={(question) => void sendChat(question)}
         onClear={() => {
           setMessages([]);
           setChatError(null);
@@ -356,7 +357,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
   }, [
     canEdit,
     messages,
-    chatDraft,
+    chatSeed,
     chatBusy,
     saving,
     chatError,
@@ -901,7 +902,8 @@ export function draftingLabel(sections: string[]): string {
 interface ChatPanelProps {
   canEdit: boolean;
   messages: ChatMessage[];
-  draft: string;
+  /** Prefill for the input; a new object (nonce) re-applies the same text. */
+  seed: { text: string; nonce: number } | null;
   busy: boolean;
   error: string | null;
   /** In-flight assistant text ('' = waiting; null = idle). */
@@ -913,8 +915,7 @@ interface ChatPanelProps {
   currentText: string | null;
   applied: Set<number>;
   reviewing: number | null;
-  onDraftChange: (value: string) => void;
-  onSend: () => void;
+  onSend: (question: string) => void;
   onClear: () => void;
   onDismissError: () => void;
   onReview: (edits: ProposedEdit[], messageIndex: number) => void;
@@ -926,6 +927,23 @@ function ChatPanel(props: ChatPanelProps) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.length, props.streaming]);
+
+  // The draft lives HERE, not in the page. The panel is handed to the shell
+  // through an effect, so a page-owned value would reach the input one
+  // render after each keystroke — React resets the DOM to the stale value in
+  // between, which throws the caret to the end and makes mid-text editing
+  // impossible (live finding). The page only seeds it ("Ask about this
+  // section") and receives the text on send.
+  const [draft, setDraft] = useState('');
+  useEffect(() => {
+    if (props.seed) setDraft(props.seed.text);
+  }, [props.seed]);
+  const send = () => {
+    const question = draft.trim();
+    if (!question || props.busy) return;
+    setDraft('');
+    props.onSend(question);
+  };
 
   return (
     <div className="chat-drawer">
@@ -1020,9 +1038,9 @@ function ChatPanel(props: ChatPanelProps) {
             </Alert>
           )}
           <PromptInput
-            value={props.draft}
-            onChange={({ detail }) => props.onDraftChange(detail.value)}
-            onAction={props.onSend}
+            value={draft}
+            onChange={({ detail }) => setDraft(detail.value)}
+            onAction={send}
             disabled={props.busy}
             actionButtonAriaLabel="Send"
             actionButtonIconName="send"
