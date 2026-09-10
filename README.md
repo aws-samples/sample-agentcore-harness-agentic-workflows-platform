@@ -97,6 +97,7 @@ Useful context flags:
 - `-c removalPolicy=destroy` — **recommended for trials**: lets `cdk destroy` remove stateful resources later. Omit for production-like deployments.
 - `-c deepModelId=<id>` — optional but recommended: adds a deep-tier model for the planner and per-task assignment.
 - `-c fastModelId=<id>` — optional: adds a cheap tier to the per-task model menu.
+- `-c stackName=<name>` — optional: deploy under a different stack name. Needed when the same account already hosts this stack in another region: CloudFront resources are global and their generated names derive from the stack name, so a second `MarketingWorkflow` fails with "already exists".
 
 The deploy prints the outputs you need — web app URL, user pool id, API URL. List them anytime:
 

@@ -72,7 +72,14 @@ const region =
   (app.node.tryGetContext('region') as string | undefined) ??
   process.env.CDK_DEFAULT_REGION ??
   'ap-southeast-2';
-new MarketingWorkflowStack(app, 'MarketingWorkflow', {
+// Optional: -c stackName=<name> when the same account already hosts this
+// stack in another region. CloudFront resources (OriginAccessControl) are
+// global and their generated names derive from the stack name, so two
+// same-named stacks in one account collide with "already exists".
+const stackName =
+  (app.node.tryGetContext('stackName') as string | undefined) ??
+  'MarketingWorkflow';
+new MarketingWorkflowStack(app, stackName, {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region,
