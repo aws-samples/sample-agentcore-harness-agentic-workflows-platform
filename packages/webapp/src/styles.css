@@ -123,6 +123,13 @@ body {
 
 /* ── Chat drawer ── */
 
+/* StatusIndicator breaks long text anywhere ("vali|dation" in the drafting
+   label, seen in the docs capture); wrap at word boundaries instead. */
+.chat-status-label {
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
 .chat-turn {
   padding: 6px 10px;
   border-radius: 8px;

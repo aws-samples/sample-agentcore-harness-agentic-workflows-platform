@@ -104,18 +104,25 @@ drew on; if the material does not contain the answer, it says so. "Ask
 about this section" on any heading seeds the question for you. Answers
 stream as they are written.
 
-Ask for a change instead — *"halve the executive summary and turn the
-risks into a Risk / Evidence / Mitigation table"* — and the assistant plans
-every edit the request implies and proposes them together. While it
-drafts, the drawer shows which section it is on ("Drafting section 2 of
-3: 8. Risks…"); a multi-section rewrite takes a minute or so of model
-time. Then the report itself switches to **review mode**: each proposed
-section appears in place as a word-level diff (removed words struck out in
-red, added words in green) with its own **Accept / Keep current** toggle,
-and a bar pinned above the report offers **Accept all**, **Keep all
-current**, and **Save**. Unchanged sections render as normal text, so each
-change is read in context. Nothing is written until you save; the save
-becomes the next version, and the generated report is never overwritten.
+![Report assistant — a grounded answer](images/webapp/11-report-chat-answer.png)
+
+Ask for a change instead — *"rewrite the risks as a Risk / Evidence /
+Mitigation table"* — and the assistant plans every edit the request
+implies and proposes them together. While it drafts, the drawer shows
+which section it is on; a multi-section rewrite takes a minute or so of
+model time.
+
+![Report assistant — drafting a section edit](images/webapp/12-report-chat-drafting.png)
+
+Then the report itself switches to **review mode**: each proposed section
+appears in place as a word-level diff (removed words struck out in red,
+added words in green) with its own **Accept / Keep current** toggle, and a
+bar pinned above the report offers **Accept all**, **Keep all current**,
+and **Save**. Unchanged sections render as normal text, so each change is
+read in context. Nothing is written until you save; the save becomes the
+next version, and the generated report is never overwritten.
+
+![Report review — per-section diff with Accept / Keep current](images/webapp/13-report-review-diff.png)
 
 Two guard rails are worth knowing. The assistant can only replace whole
 sections, rename a heading, or edit a section's own text (sub-sections are
@@ -155,5 +162,13 @@ APP_URL=<WebAppUrl> APP_USER=<user> APP_PASSWORD=<password> \
 
 The script signs in, creates a workflow named "Velvet Fox AU spring
 campaign", drafts and saves a plan, executes a full run (Bedrock spend
-applies), and writes the PNG set to `docs/images/webapp/`. It does not yet
-capture the report assistant (section 7b); those shots are a follow-up.
+applies), and writes the PNG set to `docs/images/webapp/`.
+
+The report-assistant shots (section 7b) come from a separate, cheaper
+script that chats with an existing finished run — two `report_chat` turns,
+about two minutes, nothing saved:
+
+```bash
+APP_URL=<WebAppUrl> APP_USER=<user> APP_PASSWORD=<password> RUN_ID=<run-id> \
+  node scripts/capture-chat-shots.mjs
+```

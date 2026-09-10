@@ -1028,13 +1028,15 @@ function ChatPanel(props: ChatPanelProps) {
                       <Markdown text={props.streaming} />
                       {props.drafting && (
                         <StatusIndicator type="loading">
-                          {draftingLabel(props.drafting)}
+                          <span className="chat-status-label">{draftingLabel(props.drafting)}</span>
                         </StatusIndicator>
                       )}
                     </SpaceBetween>
                   ) : (
                     <StatusIndicator type="loading">
-                      {props.drafting ? draftingLabel(props.drafting) : 'Thinking…'}
+                      <span className="chat-status-label">
+                        {props.drafting ? draftingLabel(props.drafting) : 'Thinking…'}
+                      </span>
                     </StatusIndicator>
                   )}
                 </div>
