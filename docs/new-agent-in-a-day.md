@@ -41,7 +41,10 @@ deployed.
    foundation's `agents` array instead — same schema, same validation. See
    `examples/second-workload`.)
 5. **That's the whole wiring** — the worker map, IAM grants, planner
-   catalog, and API validation all derive from that one entry.
+   catalog, and API validation all derive from that one entry. Two names
+   are reserved and never become workers: `planner` (the planning harness)
+   and `report_chat` (the reader-facing report assistant) — pick anything
+   else for a worker.
 6. **New tool too?** Two paths (~45 min):
    - Provider hosts an MCP server → federate it with `GatewayMcpServerTarget`
      (endpoint + API-key credential provider, no code).

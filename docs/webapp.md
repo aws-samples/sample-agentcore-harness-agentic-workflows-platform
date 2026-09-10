@@ -88,6 +88,45 @@ footprint, and the report says so prominently instead of inventing one.
 
 ![Report](images/webapp/08-report.png)
 
+Every saved version of the report is kept: the version selector above the
+report switches between the generated original (v1) and each later edit,
+with who saved it and why.
+
+## 7b. Ask the report — and have it revised
+
+The chat icon at the top right opens the **report assistant** in a side
+drawer next to the report (the drawer stays put while the report scrolls).
+It is a dedicated `report_chat` agent grounded on the report you are
+reading plus the specialist task outputs it was built from — and nothing
+else. Ask what supports a verdict, where a figure came from, or what the
+coverage gaps mean, and it answers with the section (and task output) it
+drew on; if the material does not contain the answer, it says so. "Ask
+about this section" on any heading seeds the question for you. Answers
+stream as they are written.
+
+Ask for a change instead — *"halve the executive summary and turn the
+risks into a Risk / Evidence / Mitigation table"* — and the assistant plans
+every edit the request implies and proposes them together. While it
+drafts, the drawer shows which section it is on ("Drafting section 2 of
+3: 8. Risks…"); a multi-section rewrite takes a minute or so of model
+time. Then the report itself switches to **review mode**: each proposed
+section appears in place as a word-level diff (removed words struck out in
+red, added words in green) with its own **Accept / Keep current** toggle,
+and a bar pinned above the report offers **Accept all**, **Keep all
+current**, and **Save**. Unchanged sections render as normal text, so each
+change is read in context. Nothing is written until you save; the save
+becomes the next version, and the generated report is never overwritten.
+
+Two guard rails are worth knowing. The assistant can only replace whole
+sections, rename a heading, or edit a section's own text (sub-sections are
+kept unless it deliberately restructures them), so a change is always
+reviewable as a section diff. And any proposed section that would drop
+most of the current text starts as *Keep current* with a warning — a large
+cut has to be chosen deliberately, never carried along by *Accept all*.
+
+Only the workflow owner or an administrator can save; everyone else can
+still ask questions and preview proposals.
+
 ## 8. Settings: tune agents at runtime
 
 The Settings page exposes the runtime configuration layer — no redeploy
@@ -98,9 +137,12 @@ needed, deployed defaults always restorable:
 Per agent (admin-gated): the **system prompt** (e.g. `product_expert`'s
 maintained portfolio brief lives here), the **model override**
 (Bedrock-verified at save), **thinking effort** for the planner, and
-read-only **badges** showing each agent's deployed tool surface. Org-wide:
-the **model catalog** the planner assigns from, with the complexity
-guidance it reads verbatim.
+read-only **badges** showing each agent's deployed tool surface. The
+`report_chat` assistant is tuned here too (its grounding and editing rules
+are its system prompt). Org-wide: the **model catalog** the planner assigns
+from, with the complexity guidance it reads verbatim, and the **report
+chat turn limit** (default 100 turns per conversation; the whole
+conversation is re-sent each turn, so this bounds prompt size).
 
 ![Settings — agent detail](images/webapp/10-settings-agent-detail.png)
 
@@ -113,4 +155,5 @@ APP_URL=<WebAppUrl> APP_USER=<user> APP_PASSWORD=<password> \
 
 The script signs in, creates a workflow named "Velvet Fox AU spring
 campaign", drafts and saves a plan, executes a full run (Bedrock spend
-applies), and writes the PNG set to `docs/images/webapp/`.
+applies), and writes the PNG set to `docs/images/webapp/`. It does not yet
+capture the report assistant (section 7b); those shots are a follow-up.
