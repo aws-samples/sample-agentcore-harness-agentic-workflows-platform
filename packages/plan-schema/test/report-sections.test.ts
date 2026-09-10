@@ -174,3 +174,67 @@ describe('applySectionEdits', () => {
     expect(badLevel.ok).toBe(false);
   });
 });
+
+import { editTarget } from '../src/report-sections';
+
+describe('editing a section that contains sub-sections', () => {
+  it('renaming the title replaces only the title, never the whole report (live finding)', () => {
+    const title = findReportSection(DOC, '# Q2 Brief')!;
+    expect(title.endLine).toBe(DOC.split('\n').length); // the # range IS the whole doc
+    const target = editTarget(DOC, title, '# Company X Q2 Brief');
+    expect(target.startLine).toBe(0);
+    expect(target.endLine).toBe(2); // heading + blank line before "## Executive summary"
+
+    const result = replaceReportSection(DOC, '# Q2 Brief', '# Company X Q2 Brief');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.previous).toBe('# Q2 Brief\n');
+    expect(result.markdown).toBe(DOC.replace('# Q2 Brief', '# Company X Q2 Brief'));
+  });
+
+  it('a replacement without sub-headings edits the parent’s own text and keeps its children', () => {
+    const result = replaceReportSection(DOC, '## Key findings', '## Key findings\n\nIntro line.');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.markdown).toContain('## Key findings\n\nIntro line.\n\n### Premiumisation\n\nUp.');
+    expect(result.markdown).toContain('### No/low\n\nFlat.');
+  });
+
+  it('a replacement WITH sub-headings restructures the whole range, as written', () => {
+    const result = replaceReportSection(
+      DOC,
+      '## Key findings',
+      '## Key findings\n\n### Merged\n\nUp, then flat.',
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.markdown).toContain('### Merged\n\nUp, then flat.\n\n## Sources');
+    expect(result.markdown).not.toContain('### Premiumisation');
+    expect(result.markdown).not.toContain('### No/low');
+  });
+
+  it('title rename plus ordinary section edits apply together (the reported request)', () => {
+    const result = applySectionEdits(DOC, [
+      { heading: '# Q2 Brief', newMarkdown: '# Company X Q2 Brief' },
+      { heading: '## Sources', newMarkdown: '## Sources\n\n- Company X internal brief' },
+      { heading: '### Premiumisation', newMarkdown: '### Premiumisation\n\nUp (Company X).' },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.markdown.startsWith('# Company X Q2 Brief\n\n## Executive summary')).toBe(true);
+    expect(result.markdown).toContain('### Premiumisation\n\nUp (Company X).\n\n### No/low');
+    expect(result.markdown.endsWith('## Sources\n\n- Company X internal brief')).toBe(true);
+    expect(result.markdown.split('\n').length).toBe(DOC.split('\n').length);
+  });
+
+  it('rejects a whole-range parent rewrite combined with an edit inside it', () => {
+    const result = applySectionEdits(DOC, [
+      { heading: '## Key findings', newMarkdown: '## Key findings\n\n### Merged\n\nx' },
+      { heading: '### No/low', newMarkdown: '### No/low\n\nFlat still.' },
+    ]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.index).toBe(1);
+    expect(result.error).toMatch(/overlaps/);
+  });
+});

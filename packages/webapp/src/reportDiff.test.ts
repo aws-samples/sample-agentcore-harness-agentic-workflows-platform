@@ -3,6 +3,7 @@ import {
   describeDiff,
   diffBlocks,
   diffMarkdown,
+  removesMostContent,
   splitMarkdownBlocks,
   summarizeDiff,
 } from './reportDiff';
@@ -144,5 +145,20 @@ describe('wordDiffMarkdown', () => {
     expect(wordDiffMarkdown('One two three. Four.', 'One two three.')).toBe(
       'One two three.<del> Four.</del>',
     );
+  });
+});
+
+describe('removesMostContent', () => {
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(' ');
+  it('flags a replacement that keeps under 30% of the words', () => {
+    expect(removesMostContent(`## S\n\n${words(100)}`, '## S\n\nshort.')).toBe(true);
+    expect(removesMostContent(`## S\n\n${words(100)}`, `## S\n\n${words(25)}`)).toBe(true);
+  });
+  it('does not flag ordinary rewrites, including halving a section', () => {
+    expect(removesMostContent(`## S\n\n${words(100)}`, `## S\n\n${words(50)}`)).toBe(false);
+    expect(removesMostContent(`## S\n\n${words(100)}`, `## S\n\n${words(120)}`)).toBe(false);
+  });
+  it('ignores tiny sections such as a title line', () => {
+    expect(removesMostContent('# Solera Estates Brief', '# Company X Brief')).toBe(false);
   });
 });

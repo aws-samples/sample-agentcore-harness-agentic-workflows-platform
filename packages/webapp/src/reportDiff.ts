@@ -166,6 +166,20 @@ export function describeDiff(summary: DiffSummary): string {
   return `${blocks} · +${summary.wordsAdded} / −${summary.wordsRemoved} words`;
 }
 
+/**
+ * True when a proposed replacement drops most of the current text: the
+ * result keeps under 30% of the current words. Such edits are shown with a
+ * warning and start as "Keep current", so a large cut is opted into per
+ * section rather than riding along on Accept all / Save. Ordinary rewrites
+ * (even "halve this section") stay below the threshold.
+ */
+export function removesMostContent(current: string, proposed: string): boolean {
+  const before = wordCount(current);
+  if (before < 20) return false; // tiny sections: nothing meaningful to protect
+  const after = wordCount(proposed);
+  return after / before < 0.3;
+}
+
 // ── Hunks: group changes so each can be accepted or rejected on its own ────
 
 export type Hunk =

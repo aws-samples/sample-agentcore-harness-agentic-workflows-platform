@@ -32,6 +32,7 @@ import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Textarea from '@cloudscape-design/components/textarea';
 import {
   applySectionEdits,
+  editTarget,
   extractReportSection,
   findReportSection,
   listReportSections,
@@ -51,6 +52,7 @@ import {
   groupHunks,
   joinBlocks,
   summarizeDiff,
+  removesMostContent,
   wordDiffMarkdown,
   type Hunk,
 } from '../reportDiff';
@@ -256,7 +258,16 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
   function reviewProposal(edits: ProposedEdit[], messageIndex: number) {
     setSelectedVersion(latest.version);
     setEditing(false);
-    setReview({ edits, accepted: edits.map(() => true), messageIndex, view: 'diff' });
+    // Edits that would drop most of a section start as "Keep current": a big
+    // cut must be chosen deliberately, never carried by Accept all / Save.
+    const text = loaded?.text ?? '';
+    const accepted = edits.map((edit) => {
+      const section = findReportSection(text, edit.heading);
+      if (!section) return true;
+      const current = extractReportSection(text, editTarget(text, section, edit.newMarkdown));
+      return !removesMostContent(current, edit.newMarkdown);
+    });
+    setReview({ edits, accepted, messageIndex, view: 'diff' });
     window.setTimeout(
       () => reviewTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
       50,
@@ -553,11 +564,13 @@ function ReportBody(props: ReportBodyProps) {
   // Resolve each proposed edit to a section range in the current text.
   const targets = useMemo(() => {
     if (!review) return [];
-    return review.edits.map((edit, index) => ({
-      index,
-      edit,
-      section: findReportSection(text, edit.heading),
-    }));
+    return review.edits.map((edit, index) => {
+      const section = findReportSection(text, edit.heading);
+      // Diff against the lines the edit actually replaces (a parent's own
+      // text when the replacement has no sub-headings), never the whole
+      // nested range — see editTarget.
+      return { index, edit, section: section && editTarget(text, section, edit.newMarkdown) };
+    });
   }, [text, review]);
   const missing = targets.filter((t) => !t.section);
 
@@ -681,7 +694,8 @@ function ReviewBar(props: ReviewBarProps) {
     for (const edit of props.edits) {
       const section = findReportSection(props.currentText, edit.heading);
       if (!section) continue;
-      const s = summarizeDiff(diffMarkdown(extractReportSection(props.currentText, section), edit.newMarkdown));
+      const target = editTarget(props.currentText, section, edit.newMarkdown);
+      const s = summarizeDiff(diffMarkdown(extractReportSection(props.currentText, target), edit.newMarkdown));
       added += s.wordsAdded;
       removed += s.wordsRemoved;
     }
@@ -768,6 +782,7 @@ interface SectionReviewProps {
 function SectionReview(props: SectionReviewProps) {
   const hunks = useMemo(() => groupHunks(diffMarkdown(props.current, props.proposed)), [props.current, props.proposed]);
   const summary = useMemo(() => describeDiff(summarizeDiff(diffMarkdown(props.current, props.proposed))), [props.current, props.proposed]);
+  const bigCut = removesMostContent(props.current, props.proposed);
   const title = sectionTitle(props.proposed.split('\n')[0] ?? '');
   return (
     <div className={`report-review report-review-${props.accepted ? 'accepted' : 'rejected'}`}>
@@ -779,6 +794,9 @@ function SectionReview(props: SectionReviewProps) {
           <Box color="text-body-secondary" fontSize="body-s">
             {summary}
           </Box>
+          {bigCut && (
+            <StatusIndicator type="warning">Removes most of this section</StatusIndicator>
+          )}
           {props.canEdit ? (
             <SegmentedControl
               selectedId={props.accepted ? 'accept' : 'keep'}
@@ -1034,9 +1052,10 @@ function ProposalSummary(props: ProposalSummaryProps) {
     () =>
       edits.map((edit) => {
         const section = currentText ? findReportSection(currentText, edit.heading) : undefined;
+        const target = currentText && section ? editTarget(currentText, section, edit.newMarkdown) : undefined;
         const summary =
-          currentText && section
-            ? describeDiff(summarizeDiff(diffMarkdown(extractReportSection(currentText, section), edit.newMarkdown)))
+          currentText && target
+            ? describeDiff(summarizeDiff(diffMarkdown(extractReportSection(currentText, target), edit.newMarkdown)))
             : currentText
               ? 'not in the current version'
               : null;

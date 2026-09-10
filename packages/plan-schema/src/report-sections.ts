@@ -94,6 +94,35 @@ export function extractReportSection(
   return markdown.split('\n').slice(section.startLine, section.endLine).join('\n');
 }
 
+/**
+ * The line range a replacement actually stands in for.
+ *
+ * A section's full range runs to the next heading of the same or higher
+ * level, so it CONTAINS its sub-sections — and the `#` title's range is the
+ * whole document. A replacement that carries no sub-headings is therefore
+ * read as the section's OWN text (heading + body up to its first
+ * sub-heading), and the children are kept. A replacement that does include
+ * sub-headings restructures the whole range, as written.
+ *
+ * Live finding: "rename the company in the title" produced a heading-only
+ * replacement for the `#` section, which the old whole-range rule turned
+ * into "delete the entire report" (+13 / −2355 words in review).
+ */
+export function editTarget(
+  markdown: string,
+  section: ReportSection,
+  newMarkdown: string,
+): ReportSection {
+  const firstChild = listReportSections(markdown).find(
+    (other) => other.startLine > section.startLine && other.startLine < section.endLine,
+  );
+  if (!firstChild) {
+    return section;
+  }
+  const replacementHasSubheadings = listReportSections(newMarkdown).length > 1;
+  return replacementHasSubheadings ? section : { ...section, endLine: firstChild.startLine };
+}
+
 export interface ReplaceSectionResult {
   ok: true;
   markdown: string;
@@ -144,17 +173,21 @@ export function replaceReportSection(
       error: 'replacement may only contain sub-headings deeper than the section itself',
     };
   }
+  const target = editTarget(markdown, section, newMarkdown);
   const lines = markdown.split('\n');
-  const previous = lines.slice(section.startLine, section.endLine).join('\n');
+  const previous = lines.slice(target.startLine, target.endLine).join('\n');
+  return { ok: true, markdown: splice(lines, target, newMarkdown).join('\n'), previous };
+}
+
+/** Replace `target`'s lines with `newMarkdown`, keeping one blank line before what follows. */
+function splice(lines: string[], target: ReportSection, newMarkdown: string): string[] {
   const body = newMarkdown.replace(/\r\n/g, '\n').replace(/\s+$/, '');
-  const isLast = section.endLine >= lines.length;
-  const replacement = isLast ? [body] : [body, ''];
-  const next = [
-    ...lines.slice(0, section.startLine),
-    ...replacement,
-    ...lines.slice(section.endLine),
-  ].join('\n');
-  return { ok: true, markdown: next, previous };
+  const isLast = target.endLine >= lines.length;
+  return [
+    ...lines.slice(0, target.startLine),
+    ...(isLast ? [body] : [body, '']),
+    ...lines.slice(target.endLine),
+  ];
 }
 
 /** One section-scoped edit in a multi-section proposal. */
@@ -189,7 +222,7 @@ export function applySectionEdits(
 ): ApplyEditsResult | ApplyEditsError {
   // Resolve every target against the original, bottom-up so earlier line
   // ranges stay valid while later ones are spliced.
-  const resolved: Array<{ index: number; section: ReportSection; edit: SectionEdit }> = [];
+  const resolved: Array<{ index: number; section: ReportSection; target: ReportSection; edit: SectionEdit }> = [];
   for (const [index, edit] of edits.entries()) {
     const section = findReportSection(markdown, edit.heading);
     if (!section) {
@@ -207,18 +240,27 @@ export function applySectionEdits(
     if (!check.ok) {
       return { ok: false, index, error: check.error };
     }
-    resolved.push({ index, section, edit });
+    const target = editTarget(markdown, section, edit.newMarkdown);
+    // A whole-range replacement swallows any other edit inside that range
+    // (e.g. rewriting a parent with new sub-headings AND editing one of its
+    // old sub-sections) — the two cannot both be honoured.
+    const overlap = resolved.find(
+      (r) =>
+        (target.startLine < r.target.endLine && r.target.startLine < target.endLine),
+    );
+    if (overlap) {
+      return {
+        ok: false,
+        index,
+        error: `edit for "${section.heading}" overlaps the edit for "${overlap.section.heading}"`,
+      };
+    }
+    resolved.push({ index, section, target, edit });
   }
-  resolved.sort((a, b) => b.section.startLine - a.section.startLine);
+  resolved.sort((a, b) => b.target.startLine - a.target.startLine);
   let lines = markdown.split('\n');
-  for (const { section, edit } of resolved) {
-    const body = edit.newMarkdown.replace(/\r\n/g, '\n').replace(/\s+$/, '');
-    const isLast = section.endLine >= lines.length;
-    lines = [
-      ...lines.slice(0, section.startLine),
-      ...(isLast ? [body] : [body, '']),
-      ...lines.slice(section.endLine),
-    ];
+  for (const { target, edit } of resolved) {
+    lines = splice(lines, target, edit.newMarkdown);
   }
   return { ok: true, markdown: lines.join('\n') };
 }

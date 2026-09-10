@@ -224,3 +224,39 @@ describe('parseChatAnswer', () => {
     expect(missingField.proposalIssue).toMatch(/missing/);
   });
 });
+
+describe('parseChatAnswer — protecting section content', () => {
+  const LONG_REPORT =
+    '# Solera Brief\n\n## Executive summary\n\nRevenue grew 12% across every region we track this year.\n\n## Sources\n\n- a';
+
+  it('a title rename is a title-only edit, not a whole-report replacement (live finding)', () => {
+    const parsed = parseChatAnswer(
+      'Renamed.\n```edit-proposal\nsection: # Solera Brief\nrationale: new name\n---\n# Company X Brief\n```',
+      LONG_REPORT,
+    );
+    expect(parsed.proposalIssue).toBeUndefined();
+    expect(parsed.proposedEdits).toEqual([
+      { heading: '# Solera Brief', newMarkdown: '# Company X Brief', rationale: 'new name' },
+    ]);
+  });
+
+  it('drops a heading-only replacement that would empty a section with text', () => {
+    const parsed = parseChatAnswer(
+      'Done.\n```edit-proposal\nsection: ## Executive summary\n---\n## Executive summary\n===\nsection: ## Sources\n---\n## Sources\n\n- b\n```',
+      LONG_REPORT,
+    );
+    expect(parsed.proposedEdits).toEqual([{ heading: '## Sources', newMarkdown: '## Sources\n\n- b' }]);
+    expect(parsed.proposalIssue).toMatch(/would empty the section/);
+    expect(parsed.proposalIssue).toMatch(/Executive summary/);
+  });
+
+  it('still allows a heading-only replacement when the section was already empty', () => {
+    const report = '# T\n\n## Notes\n\n## Sources\n\n- a';
+    const parsed = parseChatAnswer(
+      'x\n```edit-proposal\nsection: ## Notes\n---\n## Notes (none)\n```',
+      report,
+    );
+    expect(parsed.proposalIssue).toBeUndefined();
+    expect(parsed.proposedEdits?.[0]?.newMarkdown).toBe('## Notes (none)');
+  });
+});
