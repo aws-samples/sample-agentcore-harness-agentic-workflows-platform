@@ -122,7 +122,8 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
   const [answeredVersion, setAnsweredVersion] = useState<number | null>(null);
   const [applied, setApplied] = useState<Set<number>>(new Set());
   const [streaming, setStreaming] = useState<string | null>(null);
-  const [drafting, setDrafting] = useState(false);
+  /** Sections drafted so far while an edit proposal streams; null = not drafting. */
+  const [drafting, setDrafting] = useState<string[] | null>(null);
 
   // Proposal review (in the report pane)
   const [review, setReview] = useState<Review | null>(null);
@@ -278,17 +279,17 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
     setChatDraft('');
     setChatError(null);
     setStreaming('');
-    setDrafting(false);
+    setDrafting(null);
     setChatBusy(true);
     try {
       const { message, reportVersion } = await chatAboutReportStream(runId, history, {
         onDelta: (text) => setStreaming((current) => (current ?? '') + text),
-        onStatus: (phase) => {
-          if (phase === 'drafting-edit') setDrafting(true);
+        onStatus: ({ phase, sections }) => {
+          if (phase === 'drafting-edit') setDrafting(sections);
         },
       });
       setStreaming(null);
-      setDrafting(false);
+      setDrafting(null);
       setMessages((current) => [...current, message]);
       setAnsweredVersion(reportVersion);
       // Fresh proposals go straight into review so the user sees them in
@@ -298,7 +299,7 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
       }
     } catch (e) {
       setStreaming(null);
-      setDrafting(false);
+      setDrafting(null);
       if (e instanceof ApiError && e.status === 409) {
         setChatError('The report for this run isn’t available yet.');
       } else if (e instanceof ApiError && e.status === 503) {
@@ -868,6 +869,17 @@ function HunkDiff({ hunks }: { hunks: Hunk[] }) {
 
 // ── Drawer panel: the chat ───────────────────────────────────────────────
 
+/**
+ * Progress label while an edit proposal drafts. A multi-section proposal
+ * can take over a minute, so name the section in flight ("Drafting section
+ * 2: 8. Risks…") rather than showing one static spinner.
+ */
+export function draftingLabel(sections: string[]): string {
+  const current = sections[sections.length - 1];
+  if (!current) return 'Drafting section edits…';
+  return `Drafting section ${sections.length}: ${current}…`;
+}
+
 interface ChatPanelProps {
   canEdit: boolean;
   messages: ChatMessage[];
@@ -876,7 +888,8 @@ interface ChatPanelProps {
   error: string | null;
   /** In-flight assistant text ('' = waiting; null = idle). */
   streaming: string | null;
-  drafting: boolean;
+  /** Sections drafted so far during an edit proposal; null when not drafting. */
+  drafting: string[] | null;
   stale: boolean;
   latestVersion: number;
   currentText: string | null;
@@ -958,12 +971,14 @@ function ChatPanel(props: ChatPanelProps) {
                     <SpaceBetween size="xs">
                       <Markdown text={props.streaming} />
                       {props.drafting && (
-                        <StatusIndicator type="loading">Drafting section edits…</StatusIndicator>
+                        <StatusIndicator type="loading">
+                          {draftingLabel(props.drafting)}
+                        </StatusIndicator>
                       )}
                     </SpaceBetween>
                   ) : (
                     <StatusIndicator type="loading">
-                      {props.drafting ? 'Drafting section edits…' : 'Thinking…'}
+                      {props.drafting ? draftingLabel(props.drafting) : 'Thinking…'}
                     </StatusIndicator>
                   )}
                 </div>

@@ -92,6 +92,23 @@ function sse(payload: unknown): string {
 }
 
 /**
+ * Section titles the model has started so far inside the edit-proposal
+ * fence (`section: ## 8. Risks` → "8. Risks"), for live progress.
+ */
+export function draftedSections(collected: string): string[] {
+  const fenceAt = collected.indexOf('```edit-proposal');
+  if (fenceAt < 0) return [];
+  const body = collected.slice(fenceAt);
+  const titles: string[] = [];
+  // Only newline-terminated headers count: a partially streamed
+  // `section: ## Exec` must not be announced until the title is complete.
+  for (const match of body.matchAll(/^(?:section|heading):[ \t]*(.+)\n/gim)) {
+    titles.push(match[1]!.replace(/^#+\s*/, '').trim());
+  }
+  return titles;
+}
+
+/**
  * The streaming chat, independent of the Lambda runtime wrapper so it can be
  * exercised in tests with a fake sink and verifier.
  */
@@ -192,6 +209,7 @@ export async function runChatStream(
   );
   const gate = new ProposalGate();
   let announcedDrafting = false;
+  let announcedSections = 0;
   try {
     for await (const delta of deps.invoke(
       chatInvocationArgs(harnessArn, loaded.context, validated.value.messages),
@@ -201,11 +219,22 @@ export async function runChatStream(
         sink.write(sse({ type: 'delta', text: visible }));
       }
       // Once the proposal fence begins, visible text stops on purpose while
-      // the model writes the (long) replacement section — tell the client so
-      // it can show progress instead of appearing frozen mid-sentence.
-      if (gate.fenced && !announcedDrafting) {
-        announcedDrafting = true;
-        sink.write(sse({ type: 'status', phase: 'drafting-edit' }));
+      // the model writes the (long) replacement sections — tell the client so
+      // it can show progress instead of appearing frozen mid-sentence, and
+      // name each section as its header appears (a 4-section proposal can
+      // take 60–80s; a static indicator reads as a hang).
+      if (gate.fenced) {
+        if (!announcedDrafting) {
+          announcedDrafting = true;
+          sink.write(sse({ type: 'status', phase: 'drafting-edit' }));
+        }
+        const sections = draftedSections(gate.collected);
+        if (sections.length > announcedSections) {
+          announcedSections = sections.length;
+          sink.write(
+            sse({ type: 'status', phase: 'drafting-edit', sections }),
+          );
+        }
       }
     }
     const tail = gate.flush();

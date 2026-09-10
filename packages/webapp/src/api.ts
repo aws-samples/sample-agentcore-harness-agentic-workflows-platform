@@ -208,16 +208,22 @@ export interface ChatReply {
 
 type StreamEvent =
   | { type: 'delta'; text: string }
-  | { type: 'status'; phase: 'drafting-edit' }
+  | { type: 'status'; phase: 'drafting-edit'; sections?: string[] }
   | ({ type: 'done' } & ChatReply)
   | { type: 'error'; status: number; error: string };
 
 export type ChatStreamPhase = 'drafting-edit';
 
+export interface ChatStreamStatus {
+  phase: ChatStreamPhase;
+  /** Section titles the model has started so far (grows as drafting proceeds). */
+  sections: string[];
+}
+
 export interface ChatStreamCallbacks {
   onDelta: (text: string) => void;
   /** Server-side phase changes (e.g. visible text paused while an edit drafts). */
-  onStatus?: (phase: ChatStreamPhase) => void;
+  onStatus?: (status: ChatStreamStatus) => void;
 }
 
 /**
@@ -334,7 +340,7 @@ export async function chatAboutReportStream(
         sawDelta = true;
         onDelta(event.text);
       } else if (event.type === 'status') {
-        onStatus?.(event.phase);
+        onStatus?.({ phase: event.phase, sections: event.sections ?? [] });
       } else if (event.type === 'done') {
         const { type: _type, ...reply } = event;
         return reply;

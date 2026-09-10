@@ -35,6 +35,7 @@ vi.mock(
   },
 );
 import {
+  draftedSections,
   runChatStream,
   type ChatStreamSink,
   type FunctionUrlEvent,
@@ -286,6 +287,43 @@ describe('runChatStream — event stream', () => {
     ]);
   });
 
+  it('names each section as the model starts it, so long multi-section drafts show progress', async () => {
+    routeDdb(runItem());
+    const sink = new FakeSink();
+    const invoke = vi.fn().mockReturnValue(
+      deltas(
+        'Four changes.\n\n```edit-proposal\n',
+        'section: ## Executive summary\nrationale: shorter\n---\n## Executive summary\n\nBrief.\n',
+        '===\nsection: ## 8. Ri',
+        'sks\nrationale: table\n---\n## 8. Risks\n\n| Risk | Evidence |\n|---|---|\n',
+        '===\nheading: ## 9. Coverage gaps\n---\n## 9. Coverage gaps\n\n- gap\n```',
+      ),
+    );
+    await runChatStream(event(question), sink, { verifier: okVerifier, invoke });
+
+    const statuses = sink.events().filter((e) => e.type === 'status');
+    // One bare "drafting started", then one per section as its header lands,
+    // each carrying the cumulative list — never a duplicate for the same count.
+    expect(statuses).toEqual([
+      { type: 'status', phase: 'drafting-edit' },
+      { type: 'status', phase: 'drafting-edit', sections: ['Executive summary'] },
+      { type: 'status', phase: 'drafting-edit', sections: ['Executive summary', '8. Risks'] },
+      {
+        type: 'status',
+        phase: 'drafting-edit',
+        sections: ['Executive summary', '8. Risks', '9. Coverage gaps'],
+      },
+    ]);
+    // Progress names whatever the model announces; `done` still carries only
+    // edits that resolve to real sections of the report (the fixture has no
+    // Risks / Coverage gaps), so a hallucinated section shows progress but
+    // never lands as an edit.
+    const done = sink.events().find((e) => e.type === 'done')!;
+    const message = done.message as { proposedEdits: Array<{ heading: string }>; proposalIssue?: string };
+    expect(message.proposedEdits.map((e) => e.heading)).toEqual(['## Executive summary']);
+    expect(message.proposalIssue).toMatch(/8\. Risks/);
+  });
+
   it('sends SSE keepalive comments while waiting on the model, then stops', async () => {
     routeDdb(runItem());
     const sink = new FakeSink();
@@ -358,5 +396,21 @@ describe('ProposalGate', () => {
   it('withholds when the fence arrives in a single delta', () => {
     const { visible } = run(['Answer.\n```edit-proposal\n{}\n```']);
     expect(visible).toBe('Answer.\n');
+  });
+});
+
+describe('draftedSections', () => {
+  it('is empty before the proposal fence, ignoring section-like prose outside it', () => {
+    expect(draftedSections('')).toEqual([]);
+    expect(draftedSections('section: this is just text\nmore')).toEqual([]);
+  });
+  it('lists section titles inside the fence, stripping heading markers, in order', () => {
+    const collected =
+      'Sure.\n\n```edit-proposal\nsection: ## Executive summary\nrationale: x\n---\n## Executive summary\nbody\n===\nheading:   ### 8. Risks  \n---\n### 8. Risks\n';
+    expect(draftedSections(collected)).toEqual(['Executive summary', '8. Risks']);
+  });
+  it('does not count a header line that is still being streamed', () => {
+    expect(draftedSections('```edit-proposal\nsection: ## Exec')).toEqual([]);
+    expect(draftedSections('```edit-proposal\nsection: ## Exec\n')).toEqual(['Exec']);
   });
 });
