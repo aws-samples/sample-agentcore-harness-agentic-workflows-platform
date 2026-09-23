@@ -2,7 +2,7 @@
  * Typed API client. Attaches the Cognito id token; 401s clear
  * the session and bounce to login.
  */
-import type { PlanDocument } from '@agentic-platform/plan-schema';
+import type { PlanDocument, PlanDraftProgress } from '@agentic-platform/plan-schema';
 import { currentToken, signOut } from './auth';
 import { loadConfig } from './config';
 import { readSseEvents } from './sse';
@@ -143,6 +143,8 @@ export interface PlanDraftJob {
   draft?: PlanDocument;
   issues?: string[];
   attempts?: number;
+  /** Live drafting progress, written by the planner job as it streams. */
+  progress?: PlanDraftProgress;
 }
 
 export class ApiError extends Error {
