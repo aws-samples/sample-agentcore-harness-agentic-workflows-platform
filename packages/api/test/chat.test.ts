@@ -202,8 +202,8 @@ describe('POST /runs/{runId}/chat', () => {
     expect(args.harnessArn).toBe(CHAT_ARN);
     expect(args.sessionId.length).toBeGreaterThanOrEqual(33);
     expect(args.sessionId).toContain(RUN_ID);
-    // One harness session PER TURN: a shared per-run session replays every
-    // prior turn's grounding into the model (live: 181k input tokens).
+    // LEGACY fallback: a request without a conversationId (a cached SPA from
+    // before D-33) still gets a fresh session per turn.
     mocks.invokeHarnessText.mockResolvedValueOnce('again');
     await handler(chatEvent({ messages: [{ role: 'user', content: 'again?' }] }));
     const second = mocks.invokeHarnessText.mock.calls[1]![0] as { sessionId: string };
@@ -216,6 +216,62 @@ describe('POST /runs/{runId}/chat', () => {
     // No admin override → the deployed instructions/model apply unchanged.
     expect(args.systemPrompt).toBeUndefined();
     expect(args.model).toBeUndefined();
+  });
+
+  it('reuses one session per conversation and grounds only the first turn (D-33)', async () => {
+    routeDdb({
+      run: () => runItem(),
+      tasks: () => ({ Items: [] }),
+    });
+    mocks.s3Send.mockResolvedValue(s3Body(REPORT));
+
+    mocks.invokeHarnessText.mockResolvedValueOnce('first');
+    await handler(
+      chatEvent({
+        messages: [{ role: 'user', content: 'How much did revenue grow?' }],
+        conversationId: 'conv-1',
+        sessionTurn: 0,
+      }),
+    );
+    mocks.invokeHarnessText.mockResolvedValueOnce('second');
+    await handler(
+      chatEvent({
+        messages: [
+          { role: 'user', content: 'How much did revenue grow?' },
+          { role: 'assistant', content: 'first' },
+          { role: 'user', content: 'and margin?' },
+        ],
+        conversationId: 'conv-1',
+        sessionTurn: 1,
+        groundedVersion: 1,
+      }),
+    );
+
+    const [turn0, turn1] = mocks.invokeHarnessText.mock.calls.map(
+      (call) => call[0] as { sessionId: string; text: string },
+    );
+    // Same session both turns: a fresh one risks a ~40s cold container.
+    expect(turn1!.sessionId).toBe(turn0!.sessionId);
+    expect(turn0!.sessionId).toContain('conv-1');
+    // Grounding on turn 0 only — re-sending it is what caused the 181k-token
+    // blowup that made session reuse look harmful.
+    expect(turn0!.text).toContain('# Report (version 1)');
+    expect(turn1!.text).not.toContain('# Report (version 1)');
+    expect(turn1!.text.trim().endsWith('and margin?')).toBe(true);
+
+    // Fail safe: a continuation turn whose grounded version disagrees with the
+    // current one (or omits it) re-grounds rather than answering from a stale
+    // or absent report.
+    mocks.invokeHarnessText.mockResolvedValueOnce('third');
+    await handler(
+      chatEvent({
+        messages: [{ role: 'user', content: 'and now?' }],
+        conversationId: 'conv-1',
+        sessionTurn: 2,
+      }),
+    );
+    const turn2 = mocks.invokeHarnessText.mock.calls[2]![0] as { text: string };
+    expect(turn2.text).toContain('# Report (version 1)');
   });
 
   it('applies admin prompt/model overrides for report_chat (D-19)', async () => {

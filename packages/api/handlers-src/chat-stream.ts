@@ -30,6 +30,7 @@ import { parseBody, type HttpEvent } from './lib/http';
 import {
   ProposalGate,
   chatInvocationArgs,
+  conversationOf,
   finalChatPayload,
   harnessErrorMessage,
   loadChatContext,
@@ -212,7 +213,12 @@ export async function runChatStream(
   let announcedSections = 0;
   try {
     for await (const delta of deps.invoke(
-      chatInvocationArgs(harnessArn, loaded.context, validated.value.messages),
+      chatInvocationArgs(
+        harnessArn,
+        loaded.context,
+        validated.value.messages,
+        conversationOf(validated.value),
+      ),
     )) {
       const visible = gate.push(delta);
       if (visible) {
