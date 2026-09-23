@@ -775,7 +775,11 @@ export default function WorkflowDetailPage() {
  * it streams — so every label below reflects real model output.
  */
 const DRAFT_PHASE_LABEL: Record<PlanDraftPhase, string> = {
-  thinking: 'Reasoning about the goal',
+  // `thinking` spans everything before the first token, which is mostly the
+  // agent runtime starting up rather than the model reasoning (measured: 52s
+  // of a 57s pre-first-token window). Label it as startup so the UI does not
+  // misattribute the wait.
+  thinking: 'Starting the planner',
   drafting: 'Drafting tasks',
   finalizing: 'Configuring the report step',
   validating: 'Validating workers, tools and models',
@@ -823,8 +827,8 @@ function DraftProgress({
         </Box>
       ) : (
         <Box variant="small" color="text-body-secondary">
-          The planner reads the whole goal before it writes anything. Tasks
-          appear here as they are drafted.
+          The planner takes a moment to start, then reads the whole goal before
+          it writes anything. Tasks appear here as they are drafted.
         </Box>
       )}
     </SpaceBetween>
