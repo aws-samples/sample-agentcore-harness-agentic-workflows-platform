@@ -62,6 +62,7 @@ import { checkModelIds } from './lib/model-catalog-check';
 import {
   badRequest,
   callerId,
+  callerSubject,
   forbidden,
   isAdmin,
   json,
@@ -990,7 +991,7 @@ async function chatAboutReport(
         harnessArn,
         loaded.context,
         validated.value.messages,
-        conversationOf(validated.value),
+        conversationOf(validated.value, callerSubject(event)),
       ),
     );
     return json(200, finalChatPayload(raw, loaded.context));

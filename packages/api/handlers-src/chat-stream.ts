@@ -157,8 +157,12 @@ export async function runChatStream(
   if (!token) {
     return fail(401, 'missing bearer token');
   }
+  let subject: string | undefined;
   try {
-    await deps.verifier.verify(token);
+    const claims = await deps.verifier.verify(token);
+    // Binds the chat session to this caller (see chatSessionId). Absent =
+    // fall back to a per-turn session rather than an unbound shared one.
+    subject = typeof claims.sub === 'string' ? claims.sub : undefined;
   } catch (error) {
     console.warn('chat-stream: token rejected', {
       reason: error instanceof Error ? error.message : String(error),
@@ -217,7 +221,7 @@ export async function runChatStream(
         harnessArn,
         loaded.context,
         validated.value.messages,
-        conversationOf(validated.value),
+        conversationOf(validated.value, subject),
       ),
     )) {
       const visible = gate.push(delta);

@@ -14,7 +14,7 @@
  * splices cleanly — a proposal the UI could not apply is dropped with a
  * note rather than shown as a broken "Apply" button.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
@@ -463,12 +463,28 @@ export interface ChatConversation {
   sessionTurn: number;
   /** Report version the client believes the session holds; see conversationOf. */
   groundedVersion?: number;
+  /** The caller's `sub`, mixed into the session id (see chatSessionId). */
+  subject: string;
 }
 
 /**
- * Runtime session id for a chat thread. Keyed on the report VERSION as well
- * as the conversation, so saving an edited report starts a fresh session
- * rather than continuing one whose retained grounding is now stale.
+ * Short, stable fingerprint of the caller. Hashed rather than carried raw:
+ * session ids appear in logs and traces, and 12 hex characters separate users
+ * without propagating an identifier.
+ */
+function callerFingerprint(subject: string): string {
+  return createHash('sha256').update(subject).digest('hex').slice(0, 12);
+}
+
+/**
+ * Runtime session id for a chat thread. Keyed on:
+ * - the report VERSION, so saving an edited report starts a fresh session
+ *   rather than continuing one whose retained grounding is now stale;
+ * - the CALLER, so the conversation id a client supplies can only ever
+ *   address that caller's own sessions. Without this, isolation between
+ *   users would rest on a UUID being unguessable rather than on
+ *   authorization — someone who learned another user's conversation id could
+ *   otherwise continue their thread and read their earlier questions.
  *
  * The service constrains ids to `[a-zA-Z0-9][a-zA-Z0-9-_]*` (live: a space
  * fails with ValidationException) and requires ≥33 chars.
@@ -477,11 +493,13 @@ export function chatSessionId(
   runId: string,
   reportVersion: number,
   conversationId: string,
+  subject: string,
 ): string {
-  const raw = `chat-${runId}-v${reportVersion}-${conversationId}`.replace(
-    /[^a-zA-Z0-9_-]/g,
-    '-',
-  );
+  const raw =
+    `chat-${runId}-v${reportVersion}-${callerFingerprint(subject)}-${conversationId}`.replace(
+      /[^a-zA-Z0-9_-]/g,
+      '-',
+    );
   return raw.padEnd(33, '0');
 }
 
@@ -491,20 +509,26 @@ export function buildFollowUpRequest(question: string): string {
 }
 
 /**
- * The conversation a validated chat request belongs to, or undefined when the
- * client sent none — a cached SPA from before D-33, which keeps the per-turn
- * session behavior. A conversationId without a sessionTurn is treated as the
- * first turn, so the grounding is sent.
+ * The conversation a validated chat request belongs to, or undefined when it
+ * cannot be bound to one — either the client sent no conversationId (a cached
+ * SPA from before D-33) or the caller's subject is missing. Both fall back to
+ * the per-turn session behavior, which is slower but never shared. A
+ * conversationId without a sessionTurn is treated as the first turn, so the
+ * grounding is sent.
  */
-export function conversationOf(input: {
-  conversationId?: string;
-  sessionTurn?: number;
-  groundedVersion?: number;
-}): ChatConversation | undefined {
-  return input.conversationId
+export function conversationOf(
+  input: {
+    conversationId?: string;
+    sessionTurn?: number;
+    groundedVersion?: number;
+  },
+  subject: string | undefined,
+): ChatConversation | undefined {
+  return input.conversationId && subject
     ? {
         id: input.conversationId,
         sessionTurn: input.sessionTurn ?? 0,
+        subject,
         ...(input.groundedVersion !== undefined
           ? { groundedVersion: input.groundedVersion }
           : {}),
@@ -557,7 +581,12 @@ export function chatInvocationArgs(
   return {
     harnessArn,
     sessionId: conversation
-      ? chatSessionId(context.runId, context.reportVersion, conversation.id)
+      ? chatSessionId(
+          context.runId,
+          context.reportVersion,
+          conversation.id,
+          conversation.subject,
+        )
       : `chat-${context.runId}-${randomUUID()}`.padEnd(33, '0'),
     text: grounded
       ? buildChatRequest({

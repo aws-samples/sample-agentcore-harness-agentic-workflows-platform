@@ -58,6 +58,16 @@ export function callerId(event: HttpEvent): string | undefined {
 }
 
 /**
+ * The caller's immutable subject claim, for binding server-side state to one
+ * user. Prefer this over callerId for identity: `sub` never changes, whereas
+ * a username can be reassigned.
+ */
+export function callerSubject(event: HttpEvent): string | undefined {
+  const value = (event.requestContext.authorizer?.jwt?.claims ?? {})['sub'];
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+/**
  * Cognito group memberships from the JWT. The HTTP API JWT authorizer
  * stringifies array claims (e.g. "[admin analysts]"), so both the array and
  * the bracketed-string encodings are handled.

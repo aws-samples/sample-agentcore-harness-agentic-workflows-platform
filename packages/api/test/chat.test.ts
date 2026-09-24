@@ -52,7 +52,8 @@ const REPORT_KEY = `artifacts/${WORKFLOW_ID}/${RUN_ID}/report.md`;
 const CHAT_ARN = 'arn:aws:bedrock-agentcore:ap-southeast-2:1:harness/report_chat';
 const REPORT = '# Brief\n\n## Executive summary\n\nRevenue grew 12%.\n\n## Sources\n\n- a';
 
-function event(method: string, path: string, body: unknown, claims: Record<string, unknown> = { username: 'alice' }): HttpEvent {
+// A real Cognito JWT always carries `sub`; chat session binding depends on it.
+function event(method: string, path: string, body: unknown, claims: Record<string, unknown> = { username: 'alice', sub: 'alice-sub-0001' }): HttpEvent {
   return {
     rawPath: path,
     requestContext: { http: { method }, authorizer: { jwt: { claims } } },
@@ -272,6 +273,26 @@ describe('POST /runs/{runId}/chat', () => {
     );
     const turn2 = mocks.invokeHarnessText.mock.calls[2]![0] as { text: string };
     expect(turn2.text).toContain('# Report (version 1)');
+
+    // The session id is bound to the caller: the SAME conversationId from a
+    // different user must not address the first user's session, so isolation
+    // rests on authorization rather than on a UUID being unguessable.
+    mocks.invokeHarnessText.mockResolvedValueOnce('other user');
+    await handler(
+      event(
+        'POST',
+        `/runs/${RUN_ID}/chat`,
+        {
+          messages: [{ role: 'user', content: 'and margin?' }],
+          conversationId: 'conv-1',
+          sessionTurn: 1,
+          groundedVersion: 1,
+        },
+        { username: 'bob', sub: 'bob-sub-0002' },
+      ),
+    );
+    const bob = mocks.invokeHarnessText.mock.calls[3]![0] as { sessionId: string };
+    expect(bob.sessionId).not.toBe(turn0!.sessionId);
   });
 
   it('applies admin prompt/model overrides for report_chat (D-19)', async () => {
