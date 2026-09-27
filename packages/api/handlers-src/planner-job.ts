@@ -7,7 +7,7 @@
  * draft plan the UI presents for review/edit, or the validation issues.
  */
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { tableKeys } from '@agentic-platform/plan-schema';
+import { tableKeys, type PlanDraftProgress } from '@agentic-platform/plan-schema';
 import {
   PlanGenerationError,
   generatePlan,
@@ -25,6 +25,46 @@ interface PlannerJobEvent {
   jobId: string;
   workflowId: string;
   goal: string;
+}
+
+/**
+ * Floor between progress writes. The planner streams for 60–100s, so the
+ * review UI (3s poll) gains nothing from sub-second granularity — but a
+ * phase change or a newly named task is always worth a write, so this gates
+ * only repeats of an unchanged state.
+ */
+const PROGRESS_WRITE_MS = 2_000;
+
+/**
+ * Persist plan-draft progress for the review UI to poll, at most one write
+ * in flight. Progress is telemetry: a failed or dropped write must never
+ * surface as a failed draft, so writes are fire-and-forget and errors are
+ * logged only. The terminal status update is the one that matters, and it is
+ * awaited by the handler.
+ */
+function progressWriter(tableName: string, jobId: string) {
+  let lastWriteAt = 0;
+  let lastState = '';
+  let inFlight = false;
+  return (progress: Omit<PlanDraftProgress, 'updatedAt'>): void => {
+    const state = `${progress.phase}:${progress.attempt}:${progress.taskNames.length}`;
+    const unchanged = state === lastState;
+    if (inFlight || (unchanged && Date.now() - lastWriteAt < PROGRESS_WRITE_MS)) {
+      return;
+    }
+    lastState = state;
+    lastWriteAt = Date.now();
+    inFlight = true;
+    void updateJob(tableName, jobId, {
+      progress: { ...progress, updatedAt: nowIso() } satisfies PlanDraftProgress,
+    })
+      .catch((error: unknown) => {
+        console.warn('planner-job: progress write failed', { jobId, error });
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+  };
 }
 
 export async function handler(event: PlannerJobEvent): Promise<void> {
@@ -56,6 +96,7 @@ export async function handler(event: PlannerJobEvent): Promise<void> {
         return model ? { model } : {};
       })(),
       sessionId: `${jobId}-plan-draft`,
+      onProgress: progressWriter(tableName, jobId),
     });
     await updateJob(tableName, jobId, {
       status: 'succeeded',

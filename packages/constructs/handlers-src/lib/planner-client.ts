@@ -22,6 +22,8 @@ import {
   type CatalogModel,
   type CatalogWorker,
   type PlanDocument,
+  type PlanDraftPhase,
+  type PlanDraftProgress,
 } from '@agentic-platform/plan-schema';
 import { temporalGroundingBlock } from './prompt-context';
 import type { ResolvedModelInvocation } from './runtime-config';
@@ -58,6 +60,14 @@ export interface GeneratePlanArgs {
   sessionId: string;
   /** Corrective retries after the first attempt. Default 2. */
   maxRetries?: number;
+  /**
+   * Called as the plan is produced, so callers can surface progress on a
+   * 60–100s call (the API's planner-job persists it to the job record for
+   * the review UI to poll). Callbacks are already rate-limited to
+   * PROGRESS_INTERVAL_MS while streaming; phase changes always fire.
+   * Throwing from here never fails the draft.
+   */
+  onProgress?: (progress: Omit<PlanDraftProgress, 'updatedAt'>) => void;
 }
 
 export interface GeneratePlanResult {
@@ -78,6 +88,101 @@ export class PlanGenerationError extends Error {
   }
 }
 
+/** How often streaming progress is recomputed while the plan is drafted. */
+export const PROGRESS_INTERVAL_MS = 500;
+
+const TASKS_KEY = '"tasks"';
+const REPORT_KEY = '"report"';
+/**
+ * Task `name` values in the partial document. Tasks are the only objects in
+ * a plan carrying a `name` field (report has worker/format/instructions), so
+ * scanning the text between the `tasks` and `report` keys yields exactly the
+ * task names, in order, each appearing as the model completes it.
+ */
+const TASK_NAME_PATTERN = /"name"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+
+function decodeJsonString(raw: string): string {
+  try {
+    return JSON.parse(`"${raw}"`) as string;
+  } catch {
+    return raw; // truncated escape mid-stream; the next tick will parse
+  }
+}
+
+/**
+ * Derive plan-draft progress from however much of the plan document has
+ * arrived. Pure, so the phase shown to a user is a function of real model
+ * output rather than elapsed time — the planner's first token lands at ~1s
+ * and the remaining 60–100s is spent emitting the tasks, which is exactly
+ * what this reports.
+ */
+export function derivePlanDraftProgress(
+  partial: string,
+  attempt: number,
+): Omit<PlanDraftProgress, 'updatedAt'> {
+  const charsReceived = partial.length;
+  if (charsReceived === 0) {
+    return {
+      phase: attempt > 1 ? 'retrying' : 'thinking',
+      attempt,
+      taskNames: [],
+      charsReceived,
+    };
+  }
+  const taskNames: string[] = [];
+  let phase: PlanDraftPhase = 'drafting';
+  const tasksAt = partial.indexOf(TASKS_KEY);
+  if (tasksAt >= 0) {
+    const reportAt = partial.indexOf(REPORT_KEY, tasksAt);
+    const scope =
+      reportAt >= 0 ? partial.slice(tasksAt, reportAt) : partial.slice(tasksAt);
+    TASK_NAME_PATTERN.lastIndex = 0;
+    for (let m = TASK_NAME_PATTERN.exec(scope); m; m = TASK_NAME_PATTERN.exec(scope)) {
+      taskNames.push(decodeJsonString(m[1] ?? ''));
+    }
+    if (reportAt >= 0) {
+      phase = 'finalizing';
+    }
+  }
+  return { phase, attempt, taskNames, charsReceived };
+}
+
+/**
+ * Rate-limited progress emitter for one planner attempt. Phase boundaries
+ * report unconditionally; streaming updates are gated so a 5,000-delta
+ * response does not trigger 5,000 derivations (or 5,000 DynamoDB writes in
+ * the caller). A throwing callback is logged, never propagated — progress
+ * reporting must not be able to fail a draft.
+ */
+function progressReporter(
+  onProgress: GeneratePlanArgs['onProgress'],
+  attempt: number,
+) {
+  let lastAt = 0;
+  const send = (progress: Omit<PlanDraftProgress, 'updatedAt'>): void => {
+    lastAt = Date.now();
+    try {
+      onProgress?.(progress);
+    } catch (error) {
+      console.warn('planner progress callback failed', error);
+    }
+  };
+  return {
+    /** Report now, optionally forcing a phase the partial text cannot show. */
+    emit(partial: string, phase?: PlanDraftPhase): void {
+      if (!onProgress) return;
+      const derived = derivePlanDraftProgress(partial, attempt);
+      send(phase ? { ...derived, phase } : derived);
+    },
+    /** Report at most once per PROGRESS_INTERVAL_MS while streaming. */
+    maybeEmit(partial: string): void {
+      if (!onProgress) return;
+      if (Date.now() - lastAt < PROGRESS_INTERVAL_MS) return;
+      send(derivePlanDraftProgress(partial, attempt));
+    },
+  };
+}
+
 export async function generatePlan(
   args: GeneratePlanArgs,
 ): Promise<GeneratePlanResult> {
@@ -90,7 +195,12 @@ export async function generatePlan(
   let lastIssues: string[] = [];
 
   for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
-    const rawText = await invokeHarnessText({
+    const progress = progressReporter(args.onProgress, attempt);
+    // Streamed rather than buffered so progress reflects real output. The
+    // collected text is identical to invokeHarnessText's result.
+    progress.emit('');
+    let rawText = '';
+    for await (const delta of invokeHarnessStream({
       harnessArn: args.plannerHarnessArn,
       sessionId: args.sessionId,
       text: message,
@@ -98,7 +208,11 @@ export async function generatePlan(
         ? { systemPrompt: args.instructionsOverride }
         : {}),
       ...(args.model ? { model: args.model } : {}),
-    });
+    })) {
+      rawText += delta;
+      progress.maybeEmit(rawText);
+    }
+    progress.emit(rawText, 'validating');
     const parsed = parsePlanDocument(stripCodeFences(rawText));
     if (parsed.ok) {
       // Schema-valid is not enough: workers, tool names, and model ids must

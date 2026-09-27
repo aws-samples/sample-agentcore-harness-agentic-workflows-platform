@@ -2,7 +2,7 @@
  * Typed API client. Attaches the Cognito id token; 401s clear
  * the session and bounce to login.
  */
-import type { PlanDocument } from '@agentic-platform/plan-schema';
+import type { PlanDocument, PlanDraftProgress } from '@agentic-platform/plan-schema';
 import { currentToken, signOut } from './auth';
 import { loadConfig } from './config';
 import { readSseEvents } from './sse';
@@ -143,6 +143,8 @@ export interface PlanDraftJob {
   draft?: PlanDocument;
   issues?: string[];
   attempts?: number;
+  /** Live drafting progress, written by the planner job as it streams. */
+  progress?: PlanDraftProgress;
 }
 
 export class ApiError extends Error {
@@ -227,6 +229,37 @@ export interface ChatStreamCallbacks {
 }
 
 /**
+ * Identifies one chat thread so every turn reuses a single harness runtime
+ * session (D-33): a fresh session frequently waits 40s+ for a cold container,
+ * a reused one answers in ~3s. `sessionTurn` 0 tells the server this turn must
+ * carry the grounding; later turns rely on what the session already holds.
+ */
+export interface ChatConversation {
+  id: string;
+  sessionTurn: number;
+  /**
+   * Report version this session was grounded with. The server re-grounds if
+   * it disagrees with the current version, so a save we have not noticed
+   * cannot leave the assistant answering from a stale report.
+   */
+  groundedVersion?: number;
+}
+
+function conversationBody(
+  conversation: ChatConversation | undefined,
+): Record<string, string | number> {
+  return conversation
+    ? {
+        conversationId: conversation.id,
+        sessionTurn: conversation.sessionTurn,
+        ...(conversation.groundedVersion !== undefined
+          ? { groundedVersion: conversation.groundedVersion }
+          : {}),
+      }
+    : {};
+}
+
+/**
  * Silence longer than this aborts the stream. The server writes an SSE
  * keepalive every 10s while the model works, so a full minute with no bytes
  * means the connection is genuinely dead, not slow.
@@ -246,6 +279,7 @@ export async function chatAboutReportStream(
   messages: ChatMessage[],
   callbacks: ChatStreamCallbacks | ((text: string) => void),
   externalSignal?: AbortSignal,
+  conversation?: ChatConversation,
 ): Promise<ChatReply> {
   const { onDelta, onStatus } =
     typeof callbacks === 'function' ? { onDelta: callbacks, onStatus: undefined } : callbacks;
@@ -270,7 +304,7 @@ export async function chatAboutReportStream(
   const config = await loadConfig();
   const wire = messages.map(({ role, content }) => ({ role, content }));
   if (!config.chatStreamUrl) {
-    return api.chatAboutReport(runId, messages);
+    return api.chatAboutReport(runId, messages, conversation);
   }
   const token = currentToken();
   if (!token) {
@@ -281,7 +315,7 @@ export async function chatAboutReportStream(
   // Relative ('/chat') = same-origin behavior on the SPA's CloudFront
   // distribution (the deployed default); absolute = a direct URL.
   const base = new URL(config.chatStreamUrl, window.location.origin).toString().replace(/\/$/, '');
-  const body = JSON.stringify({ messages: wire });
+  const body = JSON.stringify({ messages: wire, ...conversationBody(conversation) });
   let response: Response;
   armWatchdog();
   try {
@@ -307,7 +341,7 @@ export async function chatAboutReportStream(
     }
     if (externalSignal?.aborted) throw e;
     // Network-level failure before any bytes: fall back to the API route.
-    return api.chatAboutReport(runId, messages);
+    return api.chatAboutReport(runId, messages, conversation);
   }
   if (response.status === 401) {
     signOut();
@@ -324,7 +358,7 @@ export async function chatAboutReportStream(
     );
   }
   if (!response.body) {
-    return api.chatAboutReport(runId, messages);
+    return api.chatAboutReport(runId, messages, conversation);
   }
   // A 200 that is not an event stream is the SPA's 403/404 → index.html
   // rewrite catching a chat-origin error (CloudFront error responses are
@@ -336,7 +370,7 @@ export async function chatAboutReportStream(
     console.warn(
       `report chat: streaming endpoint answered ${response.status} ${contentType || '(no content-type)'} instead of text/event-stream — falling back to the buffered route`,
     );
-    return api.chatAboutReport(runId, messages);
+    return api.chatAboutReport(runId, messages, conversation);
   }
   let sawDelta = false;
   try {
@@ -375,7 +409,7 @@ export async function chatAboutReportStream(
   }
   // Stream ended without a `done` event.
   if (!sawDelta) {
-    return api.chatAboutReport(runId, messages);
+    return api.chatAboutReport(runId, messages, conversation);
   }
   throw new ApiError(502, 'the answer stream ended unexpectedly — please try again');
 }
@@ -442,12 +476,19 @@ export const api = {
    * conversation (oldest first); the final turn must be the user's question.
    * Returns the assistant's answer, grounded in the report.
    */
-  chatAboutReport: (runId: string, messages: ChatMessage[]) =>
+  chatAboutReport: (
+    runId: string,
+    messages: ChatMessage[],
+    conversation?: ChatConversation,
+  ) =>
     request<{ message: ChatMessage; reportVersion: number }>(
       'POST',
       `/runs/${runId}/chat`,
       // Only role/content travel; proposals are server-derived.
-      { messages: messages.map(({ role, content }) => ({ role, content })) },
+      {
+        messages: messages.map(({ role, content }) => ({ role, content })),
+        ...conversationBody(conversation),
+      },
     ),
   /**
    * Save an edited report as a new version (owner or admin). `baseVersion`

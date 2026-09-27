@@ -41,6 +41,7 @@ import {
   api,
   ApiError,
   chatAboutReportStream,
+  type ChatConversation,
   type ChatMessage,
   type ProposedEdit,
   type ReportVersion,
@@ -58,6 +59,79 @@ import {
 } from '../reportDiff';
 import { useShell } from '../shell/AppShell';
 import Markdown from './Markdown';
+
+/**
+ * Idle gap after which a chat thread starts a NEW harness session and
+ * re-sends the grounding. Measured on the live harness with one idle gap per
+ * session: state was retained and the container still warm at 2, 5, 10 and
+ * 20 minutes (4.9 / 2.5 / 2.9 / 4.0s to first token). Set at the longest
+ * verified gap — going shorter throws away warmth the service would still
+ * have given us, and every discarded session costs the next question a ~50s
+ * provisioning wait. The server independently re-grounds when the report
+ * version moves, so this guards only session expiry.
+ */
+const CHAT_SESSION_IDLE_MS = 20 * 60_000;
+
+/** A fresh chat thread: new session id, grounding due on its first turn. */
+function newConversation(): ChatConversation {
+  return { id: crypto.randomUUID(), sessionTurn: 0 };
+}
+
+/**
+ * The live chat thread, persisted so a reload or a navigation away and back
+ * resumes the SAME harness session instead of provisioning another one.
+ *
+ * Without this the thread lived only in a React ref: leaving the run page
+ * discarded it, and the next question paid the full provisioning wait again
+ * even though the service still held the warm session (live: a 53.7s turn
+ * 67 seconds after a 5.4s one). sessionStorage rather than localStorage — a
+ * thread belongs to a browser tab and should not outlive it.
+ */
+interface StoredThread {
+  id: string;
+  sessionTurn: number;
+  /** Report version the session was grounded with. */
+  groundedVersion?: number;
+  /** Epoch ms of the last completed turn, for the idle check. */
+  lastTurnAt: number;
+}
+
+const threadKey = (runId: string) => `agentic.chat.thread.${runId}`;
+
+function loadThread(runId: string): StoredThread | null {
+  try {
+    const raw = sessionStorage.getItem(threadKey(runId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredThread;
+    // Anything unexpected (older shape, hand-edited, truncated) starts fresh:
+    // a wrong sessionTurn would skip grounding the session never received.
+    return typeof parsed?.id === 'string' &&
+      Number.isInteger(parsed?.sessionTurn) &&
+      parsed.sessionTurn >= 0 &&
+      Number.isFinite(parsed?.lastTurnAt)
+      ? parsed
+      : null;
+  } catch {
+    // Storage unavailable (private mode, disabled) or corrupt JSON.
+    return null;
+  }
+}
+
+function saveThread(runId: string, thread: StoredThread): void {
+  try {
+    sessionStorage.setItem(threadKey(runId), JSON.stringify(thread));
+  } catch {
+    // Storage disabled: the thread still works for this page view.
+  }
+}
+
+function clearThread(runId: string): void {
+  try {
+    sessionStorage.removeItem(threadKey(runId));
+  } catch {
+    /* nothing to clean up */
+  }
+}
 
 export interface ReportWorkspaceProps {
   runId: string;
@@ -123,6 +197,14 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [answeredVersion, setAnsweredVersion] = useState<number | null>(null);
+  /**
+   * The chat thread's harness session (D-33). Every turn reuses it so the
+   * runtime session stays live (~3s to first token, against ~50s when a new
+   * one has to be provisioned) and the grounding is sent only once. Cached in
+   * a ref and mirrored to sessionStorage: the ref keeps sendChat off the
+   * dependency list, the storage survives a reload.
+   */
+  const thread = useRef<StoredThread | null>(null);
   const [applied, setApplied] = useState<Set<number>>(new Set());
   const [streaming, setStreaming] = useState<string | null>(null);
   /** Sections drafted so far while an edit proposal streams; null = not drafting. */
@@ -294,17 +376,52 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
     setStreaming('');
     setDrafting(null);
     setChatBusy(true);
+    // Continue the thread's session unless it can no longer be trusted to hold
+    // the right grounding: a new report version means the retained copy is
+    // stale (and the server keys the session on version anyway), and a long
+    // idle gap means the session may have expired server-side. Either way,
+    // start a new session and re-ground on this turn. Falls back to the
+    // persisted thread so a reload resumes rather than re-provisions.
+    const stored = thread.current ?? loadThread(runId);
+    const staleGrounding =
+      stored?.groundedVersion !== undefined && stored.groundedVersion !== latest.version;
+    const expired = stored !== null && Date.now() - stored.lastTurnAt > CHAT_SESSION_IDLE_MS;
+    const active: ChatConversation =
+      stored === null || staleGrounding || expired
+        ? newConversation()
+        : {
+            id: stored.id,
+            sessionTurn: stored.sessionTurn,
+            ...(stored.groundedVersion !== undefined
+              ? { groundedVersion: stored.groundedVersion }
+              : {}),
+          };
     try {
-      const { message, reportVersion } = await chatAboutReportStream(runId, history, {
-        onDelta: (text) => setStreaming((current) => (current ?? '') + text),
-        onStatus: ({ phase, sections }) => {
-          if (phase === 'drafting-edit') setDrafting(sections);
+      const { message, reportVersion } = await chatAboutReportStream(
+        runId,
+        history,
+        {
+          onDelta: (text) => setStreaming((current) => (current ?? '') + text),
+          onStatus: ({ phase, sections }) => {
+            if (phase === 'drafting-edit') setDrafting(sections);
+          },
         },
-      });
+        undefined,
+        active,
+      );
       setStreaming(null);
       setDrafting(null);
       setMessages((current) => [...current, message]);
       setAnsweredVersion(reportVersion);
+      // The session now holds this turn; the next one can skip the grounding.
+      const next: StoredThread = {
+        id: active.id,
+        sessionTurn: active.sessionTurn + 1,
+        groundedVersion: reportVersion,
+        lastTurnAt: Date.now(),
+      };
+      thread.current = next;
+      saveThread(runId, next);
       // Fresh proposals go straight into review so the user sees them in
       // context without an extra click; the drawer card keeps the summary.
       if (message.proposedEdits && message.proposedEdits.length > 0 && loaded) {
@@ -348,6 +465,10 @@ export default function ReportWorkspace(props: ReportWorkspaceProps) {
           setChatError(null);
           setApplied(new Set());
           setReview(null);
+          // Abandon the harness session too, so the next question starts from
+          // a clean context instead of inheriting the cleared transcript.
+          thread.current = null;
+          clearThread(runId);
         }}
         onDismissError={() => setChatError(null)}
         onReview={reviewProposal}

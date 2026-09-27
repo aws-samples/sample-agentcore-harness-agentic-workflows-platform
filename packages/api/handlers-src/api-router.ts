@@ -49,6 +49,7 @@ import {
 import { invokeHarnessText } from '@agentic-platform/constructs/dist/handlers-src/lib/planner-client';
 import {
   chatInvocationArgs,
+  conversationOf,
   finalChatPayload,
   harnessErrorMessage,
   loadChatContext,
@@ -61,6 +62,7 @@ import { checkModelIds } from './lib/model-catalog-check';
 import {
   badRequest,
   callerId,
+  callerSubject,
   forbidden,
   isAdmin,
   json,
@@ -946,10 +948,11 @@ async function getArtifactUrl(
  * outputs it was built from, both injected into the request; it may also
  * return one section-scoped edit proposal (see lib/report-chat.ts).
  *
- * Synchronous (single bounded invocation fits the 29s router budget) and
- * stateless on the wire: the client sends the whole transcript; one runtime
- * session per run gives the harness native turn memory too. Admin prompt /
- * model overrides from Settings apply exactly as they do for workers
+ * Synchronous (single bounded invocation fits the 29s router budget). The
+ * client sends the whole transcript plus its conversation id, and every turn
+ * of a thread reuses one runtime session: grounding travels on turn 0 only,
+ * which keeps a warm container and avoids re-sending the report (D-33).
+ * Admin prompt / model overrides from Settings apply as they do for workers
  * (D-19), so the chat prompt is tunable without a deploy. Reads are open to
  * every signed-in user (shared-workspace model, matching getRun); saving an
  * edit is a separate owner-or-admin route (putReport).
@@ -984,7 +987,12 @@ async function chatAboutReport(
   }
   try {
     const raw = await invokeHarnessText(
-      chatInvocationArgs(harnessArn, loaded.context, validated.value.messages),
+      chatInvocationArgs(
+        harnessArn,
+        loaded.context,
+        validated.value.messages,
+        conversationOf(validated.value, callerSubject(event)),
+      ),
     );
     return json(200, finalChatPayload(raw, loaded.context));
   } catch (error) {

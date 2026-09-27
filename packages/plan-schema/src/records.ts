@@ -271,3 +271,41 @@ export const artifactKeys = {
   reportVersion: (workflowId: string, runId: string, version: number) =>
     `artifacts/${workflowId}/${runId}/report.v${version}.md`,
 } as const;
+
+// ── Plan draft progress (planner job records) ──────────────────────────────
+
+/**
+ * Phases a plan draft passes through. Plan drafting is ONE long model call
+ * — live-measured at 62–100s total with the first token at ~1s (planner on
+ * a deep model at high thinking effort) — so these phases are derived from
+ * what the planner has actually emitted so far, never from a timer. A
+ * progress bar driven by elapsed time would be a fiction.
+ *
+ * - `thinking`    invoked, no output yet
+ * - `drafting`    emitting the tasks array
+ * - `finalizing`  tasks done, emitting the report configuration
+ * - `validating`  stream complete, checking schema + worker/tool catalog
+ * - `retrying`    validation failed; a corrective attempt is running
+ */
+export const PLAN_DRAFT_PHASES = [
+  'thinking',
+  'drafting',
+  'finalizing',
+  'validating',
+  'retrying',
+] as const;
+
+export const PlanDraftPhaseSchema = z.enum(PLAN_DRAFT_PHASES);
+export type PlanDraftPhase = (typeof PLAN_DRAFT_PHASES)[number];
+
+export const PlanDraftProgressSchema = z.object({
+  phase: PlanDraftPhaseSchema,
+  /** 1-based planner attempt; >1 means a corrective retry (≤2 retries). */
+  attempt: z.number().int().min(1),
+  /** Task names emitted so far, in order — the UI's live signal. */
+  taskNames: z.array(z.string()).default([]),
+  /** Plan JSON characters received so far (rough completeness signal). */
+  charsReceived: z.number().int().min(0),
+  updatedAt: z.string(),
+});
+export type PlanDraftProgress = z.infer<typeof PlanDraftProgressSchema>;

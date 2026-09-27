@@ -14,7 +14,7 @@
  * splices cleanly — a proposal the UI could not apply is dropped with a
  * note rather than shown as a broken "Apply" button.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
@@ -454,29 +454,148 @@ export async function loadChatContext(args: {
 }
 
 /** The InvokeHarness arguments for a chat turn (shared by both handlers). */
+/**
+ * One chat thread, as the client tracks it. `sessionTurn` 0 means this is the
+ * first request on `id`, so the turn must carry the grounding.
+ */
+export interface ChatConversation {
+  id: string;
+  sessionTurn: number;
+  /** Report version the client believes the session holds; see conversationOf. */
+  groundedVersion?: number;
+  /** The caller's `sub`, mixed into the session id (see chatSessionId). */
+  subject: string;
+}
+
+/**
+ * Short, stable fingerprint of the caller. Hashed rather than carried raw:
+ * session ids appear in logs and traces, and 12 hex characters separate users
+ * without propagating an identifier.
+ */
+function callerFingerprint(subject: string): string {
+  return createHash('sha256').update(subject).digest('hex').slice(0, 12);
+}
+
+/**
+ * Runtime session id for a chat thread. Keyed on:
+ * - the report VERSION, so saving an edited report starts a fresh session
+ *   rather than continuing one whose retained grounding is now stale;
+ * - the CALLER, so the conversation id a client supplies can only ever
+ *   address that caller's own sessions. Without this, isolation between
+ *   users would rest on a UUID being unguessable rather than on
+ *   authorization — someone who learned another user's conversation id could
+ *   otherwise continue their thread and read their earlier questions.
+ *
+ * The service constrains ids to `[a-zA-Z0-9][a-zA-Z0-9-_]*` (live: a space
+ * fails with ValidationException) and requires ≥33 chars.
+ */
+export function chatSessionId(
+  runId: string,
+  reportVersion: number,
+  conversationId: string,
+  subject: string,
+): string {
+  const raw =
+    `chat-${runId}-v${reportVersion}-${callerFingerprint(subject)}-${conversationId}`.replace(
+      /[^a-zA-Z0-9_-]/g,
+      '-',
+    );
+  return raw.padEnd(33, '0');
+}
+
+/** A continuation turn: the session already holds the report and sources. */
+export function buildFollowUpRequest(question: string): string {
+  return ['# User message', question].join('\n\n');
+}
+
+/**
+ * The conversation a validated chat request belongs to, or undefined when it
+ * cannot be bound to one — either the client sent no conversationId (a cached
+ * SPA from before D-33) or the caller's subject is missing. Both fall back to
+ * the per-turn session behavior, which is slower but never shared. A
+ * conversationId without a sessionTurn is treated as the first turn, so the
+ * grounding is sent.
+ */
+export function conversationOf(
+  input: {
+    conversationId?: string;
+    sessionTurn?: number;
+    groundedVersion?: number;
+  },
+  subject: string | undefined,
+): ChatConversation | undefined {
+  return input.conversationId && subject
+    ? {
+        id: input.conversationId,
+        sessionTurn: input.sessionTurn ?? 0,
+        subject,
+        ...(input.groundedVersion !== undefined
+          ? { groundedVersion: input.groundedVersion }
+          : {}),
+      }
+    : undefined;
+}
+
+/**
+ * InvokeHarness arguments for one chat turn.
+ *
+ * SESSION REUSE, and why this reversed (D-33). This used to open one session
+ * per turn on the reasoning that the request already carried everything a
+ * turn needs, so session memory added nothing — and that reusing a session
+ * was actively harmful, because the grounding was re-sent in EVERY turn's
+ * message and the session replayed all of them (live: 181,868 input tokens
+ * after a handful of turns, against 6,953 for a fresh one).
+ *
+ * That token blowup was real but it was caused by re-sending the grounding,
+ * not by reuse itself. Meanwhile the per-turn session was paying a much
+ * larger cost: a session that lands on a cold runtime container waits for it
+ * to boot. Measured on this harness in ap-southeast-2 — fresh session
+ * first-token 2.9s / 4.1s / 4.5s / 37.9s / 39.4s / 40.5s / 42.4s / 52.1s /
+ * 56.0s (median 37.9s), versus a reused session at 2.4–4.1s (median 2.7s).
+ * Two thirds of fresh sessions paid 40s+.
+ *
+ * So: reuse the session AND send the grounding exactly once, on turn 0. The
+ * session then grows by answer text only — linear and small — instead of by
+ * a full report per turn. Verified live that a session retains grounding it
+ * was given on turn 0 (turns 2 and 3 answered from a report sent only on
+ * turn 1; a fresh control session correctly said it had no such context).
+ *
+ * `conversation` omitted = the old per-turn session behavior, kept so a
+ * browser running a cached SPA still works after a deploy.
+ */
 export function chatInvocationArgs(
   harnessArn: string,
   context: ChatContext,
   messages: ChatTurn[],
+  conversation?: ChatConversation,
 ) {
+  // Ground on the first turn of a session, and again whenever the client's
+  // grounded version disagrees with the current one — the server owns the
+  // version, so a client that missed a save cannot leave the session
+  // answering from a stale report. An absent groundedVersion on a
+  // continuation turn re-grounds, which is the safe direction to fail.
+  const grounded =
+    !conversation ||
+    conversation.sessionTurn === 0 ||
+    conversation.groundedVersion !== context.reportVersion;
   return {
     harnessArn,
-    // ONE SESSION PER TURN, deliberately. The request already carries all
-    // the context a turn needs (report, sources, the client-held
-    // transcript), so harness session memory adds nothing — and it is
-    // harmful: a shared per-run session replays every prior turn's full
-    // grounding payload into the model on each call. Live finding: after a
-    // handful of turns one run's session hit 181,868 input tokens (vs 6,953
-    // fresh), right at Haiku's context limit — the model returned an empty
-    // answer and latencies had climbed into the 20–30s band that caused the
-    // original 29s 500. Ids must be ≥33 chars.
-    sessionId: `chat-${context.runId}-${randomUUID()}`.padEnd(33, '0'),
-    text: buildChatRequest({
-      reportMarkdown: context.reportMarkdown,
-      reportVersion: context.reportVersion,
-      sources: context.sources,
-      messages,
-    }),
+    sessionId: conversation
+      ? chatSessionId(
+          context.runId,
+          context.reportVersion,
+          conversation.id,
+          conversation.subject,
+        )
+      : `chat-${context.runId}-${randomUUID()}`.padEnd(33, '0'),
+    text: grounded
+      ? buildChatRequest({
+          reportMarkdown: context.reportMarkdown,
+          reportVersion: context.reportVersion,
+          sources: context.sources,
+          messages,
+        })
+      : buildFollowUpRequest(messages[messages.length - 1]!.content),
     ...(context.systemPrompt ? { systemPrompt: context.systemPrompt } : {}),
     ...(context.model ? { model: context.model } : {}),
   };

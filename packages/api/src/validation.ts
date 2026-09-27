@@ -264,8 +264,31 @@ export interface ChatMessageInput {
   content: string;
 }
 
+/** Conversation id shape — it becomes part of a runtime session id. */
+const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 export interface ChatReportInput {
   messages: ChatMessageInput[];
+  /**
+   * Client-held id, stable for one chat thread, so every turn lands on the
+   * SAME harness runtime session. Optional: a request without one falls back
+   * to a per-turn session (the pre-D-33 behavior), which keeps cached SPAs
+   * working after a deploy.
+   */
+  conversationId?: string;
+  /**
+   * 0 = the first request on this conversationId, so the turn must carry the
+   * full grounding; >0 = a continuation whose grounding the session already
+   * holds. The client resets this whenever it rotates conversationId.
+   */
+  sessionTurn?: number;
+  /**
+   * The report version the client believes its session was grounded with. The
+   * server re-grounds when this disagrees with the current version, so a
+   * client that missed a save cannot leave the session reasoning over a stale
+   * report. Absent on a continuation turn = re-ground (fail safe).
+   */
+  groundedVersion?: number;
 }
 
 /**
@@ -308,7 +331,49 @@ export function validateChatReport(
   if (messages[messages.length - 1]!.role !== 'user') {
     return { ok: false, error: 'the final message must be from the user' };
   }
-  return { ok: true, value: { messages } };
+  const conversationId = input.conversationId;
+  if (conversationId !== undefined) {
+    if (typeof conversationId !== 'string' || !CONVERSATION_ID_PATTERN.test(conversationId)) {
+      return {
+        ok: false,
+        error:
+          'conversationId must be 1-64 chars of letters, digits, hyphen or underscore, starting alphanumeric',
+      };
+    }
+  }
+  const sessionTurn = input.sessionTurn;
+  if (sessionTurn !== undefined) {
+    if (
+      typeof sessionTurn !== 'number' ||
+      !Number.isInteger(sessionTurn) ||
+      sessionTurn < 0 ||
+      sessionTurn > CHAT_HISTORY_HARD_MAX
+    ) {
+      return {
+        ok: false,
+        error: `sessionTurn must be an integer between 0 and ${CHAT_HISTORY_HARD_MAX}`,
+      };
+    }
+  }
+  const groundedVersion = input.groundedVersion;
+  if (groundedVersion !== undefined) {
+    if (
+      typeof groundedVersion !== 'number' ||
+      !Number.isInteger(groundedVersion) ||
+      groundedVersion < 1
+    ) {
+      return { ok: false, error: 'groundedVersion must be a positive integer' };
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      messages,
+      ...(conversationId !== undefined ? { conversationId } : {}),
+      ...(sessionTurn !== undefined ? { sessionTurn } : {}),
+      ...(groundedVersion !== undefined ? { groundedVersion } : {}),
+    },
+  };
 }
 
 /** Report edits: full-document saves, bounded to keep S3 objects sane. */

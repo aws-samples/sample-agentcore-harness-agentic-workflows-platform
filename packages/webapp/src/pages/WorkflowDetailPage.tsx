@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { PlanDocument } from '@agentic-platform/plan-schema';
+import type { PlanDocument, PlanDraftPhase } from '@agentic-platform/plan-schema';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -61,6 +61,9 @@ export default function WorkflowDetailPage() {
   const [plan, setPlan] = useState<PlanDocument | null>(null);
   const [draft, setDraft] = useState<PlanDocument | null>(null);
   const [draftJob, setDraftJob] = useState<PlanDraftJob | null>(null);
+  // Local clock for the drafting elapsed counter: the job record's timestamps
+  // are server-side, and we only need "how long has this user been waiting".
+  const [draftStartedAt, setDraftStartedAt] = useState<number | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [scheduleExpr, setScheduleExpr] = useState('rate(7 days)');
@@ -150,6 +153,7 @@ export default function WorkflowDetailPage() {
     setDraft(null);
     try {
       const { jobId } = await api.createPlanDraft(workflowId);
+      setDraftStartedAt(Date.now());
       setDraftJob({ jobId, workflowId, status: 'pending' });
       void pollDraft(jobId);
     } catch (e) {
@@ -618,9 +622,7 @@ export default function WorkflowDetailPage() {
         >
           <SpaceBetween size="m">
             {drafting && (
-              <StatusIndicator type="in-progress">
-                Planner {draftJob?.status}… checking every {DRAFT_POLL_MS / 1000}s
-              </StatusIndicator>
+              <DraftProgress job={draftJob} startedAt={draftStartedAt} />
             )}
             {draftJob?.status === 'failed' && (
               <Alert
@@ -764,5 +766,71 @@ export default function WorkflowDetailPage() {
         />
       </SpaceBetween>
     </ContentLayout>
+  );
+}
+
+/**
+ * What the planner is doing, in the user's words. Phases come from the job
+ * record's `progress`, which the planner job derives from the plan JSON as
+ * it streams — so every label below reflects real model output.
+ */
+const DRAFT_PHASE_LABEL: Record<PlanDraftPhase, string> = {
+  // `thinking` spans everything before the first token, which is mostly the
+  // agent runtime starting up rather than the model reasoning (measured: 52s
+  // of a 57s pre-first-token window). Label it as startup so the UI does not
+  // misattribute the wait.
+  thinking: 'Starting the planner',
+  drafting: 'Drafting tasks',
+  finalizing: 'Configuring the report step',
+  validating: 'Validating workers, tools and models',
+  retrying: 'Plan needed corrections — redrafting',
+};
+
+/**
+ * Live plan-drafting progress. Drafting is one 60–100s model call whose
+ * first token arrives in about a second, so there is genuine progress to
+ * show: the phase, the tasks as they are named, and how long the user has
+ * been waiting. Deliberately NOT a percentage bar — the task count is not
+ * known until the planner has finished deciding it, so any bar would be
+ * invented.
+ */
+function DraftProgress({
+  job,
+  startedAt,
+}: {
+  job: PlanDraftJob | null;
+  startedAt: number | null;
+}) {
+  // Re-render every second so the elapsed counter moves between the 3s
+  // polls; a frozen number during a long wait reads as a hang.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => tick((n) => n + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const progress = job?.progress;
+  const phase: PlanDraftPhase = progress?.phase ?? 'thinking';
+  const tasks = progress?.taskNames ?? [];
+  const elapsed = startedAt === null ? null : Math.round((Date.now() - startedAt) / 1000);
+
+  return (
+    <SpaceBetween size="xxs">
+      <StatusIndicator type="in-progress">
+        {DRAFT_PHASE_LABEL[phase]}
+        {progress && progress.attempt > 1 ? ` (attempt ${progress.attempt})` : ''}
+        {elapsed === null ? '' : ` · ${elapsed}s elapsed`}
+      </StatusIndicator>
+      {tasks.length > 0 ? (
+        <Box variant="small" color="text-body-secondary">
+          Drafted {tasks.length} task{tasks.length === 1 ? '' : 's'}: {tasks.join(', ')}
+        </Box>
+      ) : (
+        <Box variant="small" color="text-body-secondary">
+          The planner takes a moment to start, then reads the whole goal before
+          it writes anything. Tasks appear here as they are drafted.
+        </Box>
+      )}
+    </SpaceBetween>
   );
 }
