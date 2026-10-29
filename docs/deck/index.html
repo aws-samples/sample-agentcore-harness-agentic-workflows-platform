@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Research Crew for Marketers: solution introduction</title>
+<style>
+  :root {
+    --ink: #232F3E;
+    --ink-2: #37475A;
+    --orange: #FF9900;
+    --orange-soft: #FFF4E0;
+    --blue: #0073BB;
+    --gray: #F2F3F3;
+    --gray-2: #D5DBDB;
+    --text: #16191F;
+    --muted: #545B64;
+    --font: "Amazon Ember", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0F1B2A; font-family: var(--font); color: var(--text); overflow: hidden; }
+
+  /* ---------- stage & slides ---------- */
+  #stage { position: fixed; top: 0; left: 0; width: 1920px; height: 1080px; transform-origin: 0 0; }
+  .slide { position: absolute; inset: 0; width: 1920px; height: 1080px; display: none; flex-direction: column;
+           background: #fff; padding: 84px 120px 76px; overflow: hidden; }
+  .slide.active { display: flex; }
+  .slide.dark { background: var(--ink); color: #fff; }
+  .notes { display: none; }
+
+  .eyebrow { font-size: 24px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--blue); margin: 0 0 14px; }
+  .dark .eyebrow { color: var(--orange); }
+  h1, h2, h3, p { margin: 0; }
+  h2 { font-size: 60px; line-height: 1.12; font-weight: 700; color: var(--ink); letter-spacing: -.01em; }
+  h2::after { content: ""; display: block; width: 96px; height: 6px; background: var(--orange); margin-top: 22px; }
+  .lead { font-size: 30px; color: var(--muted); margin-top: 22px; line-height: 1.35; max-width: 1560px; }
+  .lead b { color: var(--ink); }
+  .body { flex: 1; display: flex; flex-direction: column; margin-top: 44px; min-height: 0; }
+
+  .footer { position: absolute; left: 120px; right: 120px; bottom: 30px; display: flex; justify-content: space-between;
+            font-size: 18px; color: #879196; }
+  .footer .brand::before { content: ""; display: inline-block; width: 14px; height: 14px; background: var(--orange); margin-right: 10px; vertical-align: -1px; }
+  .dark .footer { color: #AAB7B8; }
+
+  .ic { width: 44px; height: 44px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .small { font-size: 19px; color: var(--muted); line-height: 1.4; }
+  .small a { color: var(--blue); }
+  code, pre { font-family: var(--mono); }
+
+  /* ---------- slide 1: title ---------- */
+  .title-wrap { flex: 1; display: grid; grid-template-columns: 1fr 640px; align-items: center; gap: 60px; }
+  .title-wrap h1 { font-size: 104px; line-height: 1.02; font-weight: 800; letter-spacing: -.02em; }
+  .title-wrap .tagline { font-size: 44px; color: var(--orange); font-weight: 700; margin-top: 40px; line-height: 1.25; }
+  .title-wrap .subtitle { font-size: 32px; color: #D5DBDB; margin-top: 30px; line-height: 1.4; max-width: 1020px; }
+  .title-meta { font-size: 22px; color: #AAB7B8; margin-top: 64px; }
+  .title-meta span { color: #fff; }
+
+  /* ---------- cards ---------- */
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .card { background: var(--gray); border-radius: 10px; padding: 24px 32px 26px; border-top: 5px solid var(--ink); }
+  .card h3 { font-size: 30px; color: var(--ink); line-height: 1.2; margin-top: 12px; }
+  .card p { font-size: 23px; color: var(--muted); line-height: 1.4; margin-top: 10px; }
+  .card .ic { color: var(--blue); }
+  .pill { display: inline-block; font-size: 17px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+          background: var(--orange); color: var(--ink); padding: 4px 12px; border-radius: 999px; margin-left: 10px; vertical-align: 4px; }
+  .strip { margin-top: 26px; background: var(--ink); color: #fff; border-radius: 10px; padding: 24px 34px; font-size: 27px;
+           display: flex; align-items: center; gap: 22px; }
+  .strip b { color: var(--orange); white-space: nowrap; }
+  .strip .ic { color: var(--orange); width: 40px; height: 40px; }
+
+  /* ---------- slide 3: challenges ---------- */
+  .challenges { display: grid; grid-template-columns: 560px 1fr; gap: 70px; flex: 1; }
+  .quote { background: var(--ink); color: #fff; border-radius: 12px; padding: 56px 52px; display: flex; flex-direction: column; justify-content: center; }
+  .quote p { font-size: 44px; line-height: 1.25; font-weight: 700; }
+  .quote p em { font-style: normal; color: var(--orange); }
+  .quote .small { color: #AAB7B8; margin-top: 30px; font-size: 22px; }
+  .ch-list { display: flex; flex-direction: column; justify-content: space-between; }
+  .ch { display: flex; gap: 28px; align-items: flex-start; padding: 18px 0; border-bottom: 1px solid var(--gray-2); }
+  .ch:last-child { border-bottom: 0; }
+  .ch .ic { color: var(--orange); width: 50px; height: 50px; margin-top: 4px; }
+  .ch h3 { font-size: 32px; color: var(--ink); }
+  .ch p { font-size: 23px; color: var(--muted); margin-top: 6px; line-height: 1.35; }
+
+  /* ---------- slide 4: mapping ---------- */
+  .map { display: grid; grid-template-columns: 520px 60px 1fr; row-gap: 12px; align-items: stretch; }
+  .map .c { background: var(--gray); border-radius: 8px; padding: 14px 24px; font-size: 23px; color: var(--muted); display: flex; align-items: center; }
+  .map .arrow { display: flex; align-items: center; justify-content: center; color: var(--orange); font-size: 34px; font-weight: 700; }
+  .map .a { border-left: 5px solid var(--orange); padding: 10px 24px; display: flex; flex-direction: column; justify-content: center; }
+  .map .a b { font-size: 26px; color: var(--ink); }
+  .map .a span { font-size: 21px; color: var(--muted); margin-top: 3px; line-height: 1.3; }
+  .map .hdr { font-size: 18px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #879196; padding: 0 4px; }
+  .crew { margin-top: 30px; }
+  .crew-title { font-size: 20px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--blue); margin-bottom: 12px; }
+  .crew-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .chip { background: #fff; border: 2px solid var(--gray-2); border-radius: 8px; padding: 10px 16px; }
+  .chip b { display: block; font-size: 21px; color: var(--ink); }
+  .chip span { display: block; font-size: 17px; color: var(--muted); margin-top: 2px; }
+  .chip.lead-chip { border-color: var(--ink); }
+
+  /* ---------- slide 5: flow ---------- */
+  .flow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 40px; margin-top: 10px; position: relative; }
+  .step { position: relative; border-radius: 10px; padding: 26px 22px 24px; background: var(--gray); min-height: 360px; }
+  .step.you { background: var(--orange-soft); border: 3px solid var(--orange); }
+  .step.crew-s { border: 3px solid var(--gray-2); }
+  .step .who { font-size: 17px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+  .step.you .who { background: var(--orange); color: var(--ink); }
+  .step.crew-s .who { background: var(--ink); color: #fff; }
+  .step .num { position: absolute; top: 18px; right: 20px; font-size: 40px; font-weight: 800; color: rgba(35,47,62,.18); }
+  .step h3 { font-size: 28px; color: var(--ink); margin-top: 18px; line-height: 1.2; }
+  .step p { font-size: 22px; color: var(--muted); margin-top: 10px; line-height: 1.38; }
+  .step:not(:last-child)::after { content: "\2192"; position: absolute; right: -34px; top: 140px; font-size: 32px; font-weight: 700; color: var(--orange); }
+  .assure { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 40px; }
+  .assure .box { border-left: 6px solid var(--ink); background: #fff; padding: 6px 0 6px 28px; }
+  .assure h3 { font-size: 28px; color: var(--ink); }
+  .assure ul { margin: 10px 0 0; padding-left: 26px; font-size: 24px; color: var(--muted); line-height: 1.45; }
+
+  /* ---------- slide 6: screenshots ---------- */
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 1fr; gap: 26px; flex: 1; min-height: 0; }
+  .shot { display: flex; flex-direction: column; min-height: 0; }
+  .shot .frame { flex: 1; min-height: 0; border: 1px solid var(--gray-2); border-radius: 8px; overflow: hidden; background: #fff; box-shadow: 0 6px 18px rgba(35,47,62,.12); }
+  .shot img { width: 100%; height: 100%; object-fit: cover; object-position: left top; display: block; }
+  .shot .cap { font-size: 22px; color: var(--ink); margin-top: 12px; line-height: 1.3; }
+  .shot .cap b { color: var(--blue); margin-right: 6px; }
+  .shot.wide { grid-column: span 2; }
+  .shot img.zoom { object-position: center; transform: scale(1.4); }
+  .shot img.chat { object-position: 0 8.5%; }
+  .shot.wide img { object-fit: contain; object-position: left center; background: #fff; }
+  .sched { display: inline-flex; align-items: center; gap: 12px; background: var(--orange-soft); border-radius: 8px; padding: 8px 18px; font-size: 22px; color: var(--ink); margin-top: 18px; }
+  .sched code { background: #fff; padding: 2px 8px; border-radius: 4px; font-size: 20px; }
+  .sched .ic { width: 30px; height: 30px; color: var(--orange); }
+
+  /* ---------- slide 7: quick start ---------- */
+  .qs { display: grid; grid-template-columns: 1fr 1.12fr; gap: 26px 30px; flex: 1; min-height: 0; }
+  .qstep { background: var(--gray); border-radius: 10px; padding: 22px 28px; display: flex; flex-direction: column; min-height: 0; }
+  .qstep .head { display: flex; align-items: center; gap: 16px; }
+  .qstep .n { width: 46px; height: 46px; border-radius: 50%; background: var(--orange); color: var(--ink); font-weight: 800; font-size: 26px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .qstep h3 { font-size: 28px; color: var(--ink); }
+  .qstep pre { margin: 14px 0 0; background: var(--ink); color: #E9EBED; border-radius: 6px; padding: 14px 18px; font-size: 17px; line-height: 1.5; white-space: pre; overflow: hidden; }
+  .qstep pre .c { color: #FFB84D; }
+  .qstep p { font-size: 20px; color: var(--muted); margin-top: 10px; line-height: 1.35; }
+  .qstep p code { font-size: 18px; background: #fff; padding: 1px 6px; border-radius: 4px; color: var(--ink); }
+  .prereq { font-size: 19px; color: var(--muted); margin-top: 18px; }
+
+  /* ---------- slide 8: architecture ---------- */
+  .arch { display: grid; grid-template-columns: 1130px 1fr; gap: 44px; flex: 1; min-height: 0; margin-top: 30px; }
+  .arch .diagram { border: 1px solid var(--gray-2); border-radius: 8px; background: #fff; padding: 10px; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  .arch .diagram img { max-width: 100%; max-height: 100%; display: block; color-scheme: light; }
+  .callouts { display: flex; flex-direction: column; justify-content: space-between; gap: 12px; }
+  .co { display: flex; gap: 18px; }
+  .co .n { width: 40px; height: 40px; border-radius: 50%; background: var(--ink); color: var(--orange); font-weight: 800; font-size: 22px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .co h3 { font-size: 24px; color: var(--ink); line-height: 1.2; }
+  .co p { font-size: 19px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+
+  /* ---------- slide 9: levers ---------- */
+  .levers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .lever { border-radius: 10px; background: var(--gray); padding: 26px 30px; border-top: 6px solid var(--orange); }
+  .lever .top { display: flex; align-items: center; gap: 16px; }
+  .lever .ic { color: var(--ink); width: 46px; height: 46px; }
+  .lever h3 { font-size: 34px; color: var(--ink); }
+  .lever ul { margin: 20px 0 0; padding-left: 26px; font-size: 28px; color: var(--muted); line-height: 1.42; }
+  .lever li { margin-bottom: 16px; }
+  .lever li b { color: var(--ink); }
+  .beyond { margin-top: 44px; display: flex; gap: 26px; align-items: center; background: var(--ink); color: #fff; border-radius: 10px; padding: 22px 32px; }
+  .beyond .ic { color: var(--orange); width: 50px; height: 50px; }
+  .beyond h3 { font-size: 28px; color: var(--orange); }
+  .beyond p { font-size: 24px; color: #E9EBED; margin-top: 4px; line-height: 1.35; }
+  .beyond code { font-size: 20px; color: #fff; background: var(--ink-2); padding: 1px 6px; border-radius: 4px; }
+  .fn { font-size: 18px; color: #879196; margin-top: 16px; line-height: 1.4; }
+
+  /* ---------- slide 10: rollout ---------- */
+  .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .pillar { background: var(--gray); border-radius: 10px; padding: 28px 32px 30px; }
+  .pillar .top { display: flex; align-items: center; gap: 14px; }
+  .pillar .ic { color: var(--blue); width: 40px; height: 40px; }
+  .pillar h3 { font-size: 29px; color: var(--ink); }
+  .pillar ul { margin: 18px 0 0; padding-left: 26px; font-size: 27px; color: var(--muted); line-height: 1.42; }
+  .pillar li { margin-bottom: 14px; }
+  .pillar li b { color: var(--ink); }
+  .path { margin-top: 56px; }
+  .path-title { font-size: 20px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--blue); margin-bottom: 14px; }
+  .chev { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .chev div { background: var(--ink); color: #fff; padding: 18px 26px 18px 40px; font-size: 25px; font-weight: 700; line-height: 1.2;
+              clip-path: polygon(0 0, calc(100% - 26px) 0, 100% 50%, calc(100% - 26px) 100%, 0 100%, 26px 50%); min-height: 120px; display: flex; flex-direction: column; justify-content: center; }
+  .chev div:first-child { clip-path: polygon(0 0, calc(100% - 26px) 0, 100% 50%, calc(100% - 26px) 100%, 0 100%); padding-left: 26px; }
+  .chev div:last-child { background: var(--orange); color: var(--ink); }
+  .chev span { font-size: 19px; font-weight: 400; color: #D5DBDB; margin-top: 4px; }
+  .chev div:last-child span { color: var(--ink); }
+  .harden { font-size: 23px; color: var(--muted); margin-top: 20px; }
+  .harden b { color: var(--ink); }
+
+  /* ---------- HUD ---------- */
+  #progress { position: fixed; top: 0; left: 0; height: 4px; background: var(--orange); width: 0; transition: width .25s ease; z-index: 10; }
+  #counter { position: fixed; right: 14px; top: 10px; font: 600 14px var(--font); color: #AAB7B8; background: rgba(15,27,42,.75); padding: 4px 10px; border-radius: 4px; z-index: 10; user-select: none; }
+  #hint { position: fixed; left: 50%; transform: translateX(-50%); top: 10px; background: rgba(15,27,42,.75); padding: 4px 10px; border-radius: 4px; font: 13px var(--font); color: #879196; z-index: 10; user-select: none; transition: opacity .6s; }
+  #notes-panel { position: fixed; left: 0; right: 0; bottom: 0; height: 30vh; background: #0F1B2A; color: #F2F3F3; border-top: 3px solid var(--orange);
+                 padding: 18px 28px 40px; overflow-y: auto; font-size: 18px; line-height: 1.5; display: none; z-index: 9; }
+  #notes-panel h4 { margin: 0 0 8px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--orange); }
+  #notes-panel p { margin: 0 0 10px; max-width: 1400px; }
+  body.notes-on #notes-panel { display: block; }
+
+  /* ---------- print: one slide per landscape page ---------- */
+  @media print {
+    @page { size: 1920px 1080px; margin: 0; }
+    html, body { overflow: visible; height: auto; background: #fff; }
+    #stage { position: static; transform: none !important; width: 1920px; height: auto; }
+    .slide { display: flex !important; position: relative; break-after: page; page-break-after: always; }
+    .slide:last-child { break-after: auto; page-break-after: auto; }
+    #progress, #counter, #hint, #notes-panel { display: none !important; }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Inline icon sprite (simple line icons) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M8 14h3"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.5"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.8A8 8 0 1 1 21 12z"/><path d="M8.5 11h7M8.5 14.5h4"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s-7-6.1-7-11.5a7 7 0 0 1 14 0C19 14.9 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></symbol>
+    <symbol id="i-rocket" viewBox="0 0 24 24"><path d="M5 15c-1.5 1.3-2 5-2 5s3.7-.5 5-2"/><path d="M9 15 6 12c1-4 4.5-8.5 12-9 0 7.5-5 11-9 12z"/><circle cx="14.5" cy="9.5" r="1.5"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-scatter" viewBox="0 0 24 24"><circle cx="5" cy="6" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="13" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="19" cy="18" r="2"/></symbol>
+    <symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M6 3h12M6 21h12M7 3c0 5 10 5 10 9s-10 4-10 9M17 3c0 5-10 5-10 9s10 4 10 9"/></symbol>
+    <symbol id="i-question" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7M12 17h.01"/></symbol>
+    <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.5 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.5-3.8-9S9.5 5.5 12 3z"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v5"/></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 10h4v4h-4zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .8-3 2s1.3 1.7 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6v2M12 16v2"/></symbol>
+    <symbol id="i-account" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 14h4"/></symbol>
+  </defs>
+</svg>
+
+<div id="progress"></div>
+<div id="stage">
+
+<!-- ===================== 1. Title ===================== -->
+<section class="slide dark" data-title="AI Research Crew for Marketers">
+  <div class="title-wrap">
+    <div>
+      <p class="eyebrow">Solution introduction</p>
+      <h1>AI Research Crew<br>for Marketers</h1>
+      <p class="tagline">Your team sets the strategy.<br>The crew does the legwork.</p>
+      <p class="subtitle">A multi-agent marketing research solution on AWS. A team of AI agents, set up to fit your organization.</p>
+      <p class="title-meta">Built on <span>Amazon Bedrock AgentCore</span> &middot; open-source AWS sample &middot; runs in your own AWS account</p>
+    </div>
+    <svg viewBox="0 0 640 640" width="640" height="640" aria-hidden="true">
+      <g stroke="#37475A" stroke-width="3">
+        <line x1="320" y1="320" x2="320" y2="90"/><line x1="320" y1="320" x2="519" y2="205"/>
+        <line x1="320" y1="320" x2="519" y2="435"/><line x1="320" y1="320" x2="320" y2="550"/>
+        <line x1="320" y1="320" x2="121" y2="435"/><line x1="320" y1="320" x2="121" y2="205"/>
+      </g>
+      <circle cx="320" cy="320" r="268" fill="none" stroke="#37475A" stroke-width="2" stroke-dasharray="6 10"/>
+      <g fill="#232F3E" stroke="#0073BB" stroke-width="4">
+        <circle cx="320" cy="90" r="50"/><circle cx="519" cy="205" r="50"/><circle cx="519" cy="435" r="50"/>
+        <circle cx="320" cy="550" r="50"/><circle cx="121" cy="435" r="50"/><circle cx="121" cy="205" r="50"/>
+      </g>
+      <g font-family="Helvetica Neue, Arial, sans-serif" font-size="17" font-weight="700" fill="#D5DBDB" text-anchor="middle">
+        <text x="320" y="96">Plan</text><text x="519" y="211">Research</text><text x="519" y="441">Analyze</text>
+        <text x="320" y="556">Draft</text><text x="121" y="441">Check</text><text x="121" y="211">Answer</text>
+      </g>
+      <circle cx="320" cy="320" r="96" fill="#FF9900"/>
+      <g font-family="Helvetica Neue, Arial, sans-serif" font-weight="800" fill="#232F3E" text-anchor="middle">
+        <text x="320" y="314" font-size="30">Your</text><text x="320" y="350" font-size="30">team</text>
+      </g>
+    </svg>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Sample code for evaluation &middot; not ready for production as-is</span></div>
+  <aside class="notes">
+    <p>Welcome. This is the AI Research Crew for Marketers. It is a team of specialist AI agents that does the desk research behind marketing decisions. It runs in the customer's own AWS account.</p>
+    <p>The key line: your team sets the strategy, the crew does the legwork. The marketing team stays at the center. It sets the goal, approves every plan, and makes every decision. The crew gathers facts, analyzes them and writes drafts for the team to review.</p>
+    <p>It is built on Amazon Bedrock AgentCore and comes as open-source AWS sample code. Each customer gets their own copy, set up for their brands, data and tools by their own team or a partner.</p>
+  </aside>
+</section>
+
+<!-- ===================== 2. Retail use cases ===================== -->
+<section class="slide" data-title="Retail marketing use cases">
+  <p class="eyebrow">Use cases</p>
+  <h2>Starting with retail marketing</h2>
+  <div class="body">
+    <div class="grid3">
+      <div class="card"><svg class="ic"><use href="#i-cal"/></svg><h3>Seasonal campaign planning</h3><p>Who to target, what rivals are doing, and how to stand out for a holiday or back-to-school push. Plus a draft strategy for your team.</p></div>
+      <div class="card"><svg class="ic"><use href="#i-tag"/></svg><h3>Competitor price &amp; promotion watch <span class="pill">Weekly</span></h3><p>A regular check on rival launches, promotions and price changes, in a dated report.</p></div>
+      <div class="card"><svg class="ic"><use href="#i-chat"/></svg><h3>What shoppers are saying</h3><p>How people talk about your brands in the news and on social media, with a source for every point.</p></div>
+      <div class="card"><svg class="ic"><use href="#i-pin"/></svg><h3>Entering a new market or region</h3><p>Local shoppers, competitors, price points and ad rules for a region you have in mind.</p></div>
+      <div class="card"><svg class="ic"><use href="#i-rocket"/></svg><h3>Getting ready for a launch</h3><p>Category trends, rival products and messaging risks to review before you launch.</p></div>
+      <div class="card"><svg class="ic"><use href="#i-shield"/></svg><h3>Social media ad rules check</h3><p>Platform ad policies and advertising codes turned into a simple checklist. A first check, not legal advice.</p></div>
+    </div>
+    <div class="strip"><svg class="ic"><use href="#i-globe"/></svg><span><b>Same crew, other industries:</b> consumer goods &middot; financial services &middot; travel &amp; hospitality &middot; B2B tech &middot; and more</span></div>
+    <p class="fn">The sample agents are set up for a made-up wine and drinks company. You add retail instructions and data sources when you customize it (slide 9).</p>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Use cases</span></div>
+  <aside class="notes">
+    <p>We start with retail because retail teams ask research questions often, need answers fast, and ask them again every season.</p>
+    <p>Go through the six cards. Seasonal campaign planning. A competitor price and promotion watch that runs every week on a schedule. What shoppers are saying about the brand. Entering a new market or region. Getting ready for a product launch. And a social media ad rules check. The ad rules check compares plans against public rules and platform policies. It is a first check only and does not replace legal review.</p>
+    <p>Be clear about what is in the box today. The sample agents are set up as a marketing team for a made-up wine and drinks company. The same agent roles fit retail. Your team or a partner adds retail instructions and data sources during customization.</p>
+    <p>The bottom strip shows it is not only for retail. The agents are set up through configuration, so the same crew works for consumer goods, financial services, travel and hospitality, or B2B tech.</p>
+  </aside>
+</section>
+
+<!-- ===================== 3. Why now ===================== -->
+<section class="slide" data-title="Why now and common challenges">
+  <p class="eyebrow">Why now</p>
+  <h2>Research can&rsquo;t keep up with the market</h2>
+  <p class="lead"><b>Marketers already know research matters.</b> The hard part is getting it often, for your brand, at a fair cost.</p>
+  <div class="body" style="margin-top:36px">
+    <div class="challenges">
+      <div class="quote">
+        <p>Your team&rsquo;s time is best spent on judgment, <em>not on desk research.</em></p>
+        <p class="small">The challenges we hear from marketers</p>
+      </div>
+      <div class="ch-list">
+        <div class="ch"><svg class="ic"><use href="#i-coin"/></svg><div><h3>Research is costly and soon out of date</h3><p>Agency reports take weeks, cost a lot, and are out of date soon after you get them.</p></div></div>
+        <div class="ch"><svg class="ic"><use href="#i-clock"/></svg><div><h3>Markets move faster than research</h3><p>Promotions, trends and online talk change between one report and the next.</p></div></div>
+        <div class="ch"><svg class="ic"><use href="#i-scatter"/></svg><div><h3>Information is all over the place</h3><p>Social media, news, competitor websites and your own data all sit in different places.</p></div></div>
+        <div class="ch"><svg class="ic"><use href="#i-hourglass"/></svg><div><h3>Each brief takes days of manual research</h3><p>Your analysts spend their time gathering facts, not making sense of them.</p></div></div>
+        <div class="ch"><svg class="ic"><use href="#i-question"/></svg><div><h3>General AI chat doesn&rsquo;t know your brand</h3><p>No brand knowledge, no sources, and no way to tell fact from guess.</p></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Why now</span></div>
+  <aside class="notes">
+    <p>This slide is about the customer's world, not the technology. Marketers don't need to be told that research matters. Their problems are cost and keeping research up to date. Ask which of these five sound familiar before you move on.</p>
+    <p>Agency research costs a lot and doesn't change after you get it. A report is a snapshot, and it starts to age the day it arrives. The next question means a new brief. Because each report starts from scratch, results are also hard to repeat or compare over time. Markets move faster than research. Information is spread across social media, news, competitor websites and internal systems. One brief can take days of manual desk research. And general AI chat tools don't know the brand, don't give sources, and don't separate fact from guess.</p>
+    <p>Be respectful of agencies. Agencies are still the right choice for deep strategy studies. The crew is for the frequent, everyday research in between.</p>
+    <p>The point of the quote: the marketing team's judgment is what matters. The goal is to give that judgment better input, faster, and to leave the decisions with the team.</p>
+  </aside>
+</section>
+
+<!-- ===================== 4. How the crew helps ===================== -->
+<section class="slide" data-title="How the crew helps">
+  <p class="eyebrow">How it helps</p>
+  <h2>A specialist crew for every brief</h2>
+  <div class="body" style="margin-top:34px">
+    <div class="map">
+      <div class="hdr">Challenge</div><div></div><div class="hdr">How the crew helps</div>
+      <div class="c">Research is costly and soon out of date</div><div class="arrow">&rarr;</div>
+      <div class="a"><b>Research you can refresh, at a cost you can see</b><span>Pay per run and see AI usage per task. Rerun or schedule a saved plan. Ask the report questions.</span></div>
+      <div class="c">Markets move faster than research</div><div class="arrow">&rarr;</div>
+      <div class="a"><b>Specialists work at the same time</b><span>Tasks that don&rsquo;t depend on each other run side by side. A full run usually takes under fifteen minutes.</span></div>
+      <div class="c">Information is all over the place</div><div class="arrow">&rarr;</div>
+      <div class="a"><b>One question, many sources</b><span>Ask in plain words. The crew searches the web, news, social media and any data you connect.</span></div>
+      <div class="c">General AI chat doesn&rsquo;t know your brand</div><div class="arrow">&rarr;</div>
+      <div class="a"><b>Your brand brief and your data</b><span>A portfolio expert agent knows your brand brief. You can connect your own systems too.</span></div>
+      <div class="c">Hard to trust AI answers</div><div class="arrow">&rarr;</div>
+      <div class="a"><b>Reports that show their sources</b><span>Sources are named in the text, claims without a source are marked, and gaps are stated, not made up.</span></div>
+    </div>
+    <div class="crew">
+      <div class="crew-title">Meet the crew: the ten agents in the sample</div>
+      <div class="crew-row">
+        <div class="chip lead-chip"><b>Planner</b><span>Drafts the plan for your review</span></div>
+        <div class="chip"><b>Portfolio expert</b><span>Knows your brands</span></div>
+        <div class="chip"><b>Audience insight</b><span>Customer groups &amp; trends</span></div>
+        <div class="chip"><b>Brand intelligence</b><span>Media coverage &amp; sentiment</span></div>
+        <div class="chip"><b>Competitor intelligence</b><span>Launches, prices, promotions</span></div>
+        <div class="chip"><b>Compliance check</b><span>Ad rules checklist</span></div>
+        <div class="chip"><b>Market analytics</b><span>Market size, prices, currency</span></div>
+        <div class="chip"><b>Campaign strategist</b><span>Drafts a strategy from the facts</span></div>
+        <div class="chip"><b>Report writer</b><span>Puts the report together</span></div>
+        <div class="chip lead-chip"><b>Report assistant</b><span>Answers your questions</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>How it helps</span></div>
+  <aside class="notes">
+    <p>Match each problem from the last slide to how the crew helps.</p>
+    <p>Cost and freshness: the report is research you can refresh, not a one-off snapshot. Approved plans are saved as versions. You can rerun the same research when you want or on a schedule, ask the report questions in chat, and update it section by section into new versions. You can see what drives the cost. Each run pays for Amazon Bedrock AI usage (tokens) plus any paid data services. The app shows token usage for each task and each run. A deployment that sits idle costs about four dollars a month. We don't quote savings figures. Position it as a complement: agencies for deep strategy studies, the crew for frequent everyday research.</p>
+    <p>Speed: tasks that don't depend on each other run at the same time. The docs say a full run usually takes under fifteen minutes. In the documented example, seven tasks finished in about seven minutes. Scattered information: one plain-language goal is split into searches across the web, news, social media and any internal sources we connect. Brand context: the portfolio expert holds the brand brief, which admins keep up to date in Settings. We can also connect the customer's own systems as tools. Trust: agents name their sources in the text, label anything that comes from the AI model's own knowledge as "(synthesis)", and the report lists what it could not cover instead of making up answers.</p>
+    <p>The crew row shows the ten agents in the sample (code names: planner, product_expert, audience_insight, brand_intelligence, competitor_intelligence, compliance_check, market_analytics, campaign_strategist, report_generator, report_chat). Each one writes drafts for the team. None of them makes decisions for the team.</p>
+  </aside>
+</section>
+
+<!-- ===================== 5. Your team stays in charge ===================== -->
+<section class="slide" data-title="Your team stays in charge">
+  <p class="eyebrow">Human in the loop</p>
+  <h2>Your team stays in charge</h2>
+  <div class="body">
+    <div class="flow">
+      <div class="step you"><span class="num">1</span><span class="who">Your team</span><h3>Sets the goal</h3><p>Writes the research question in plain words, like briefing a colleague.</p></div>
+      <div class="step crew-s"><span class="num">2</span><span class="who">Crew</span><h3>Drafts a plan</h3><p>The planner splits the goal into tasks and gives each one to a specialist.</p></div>
+      <div class="step you"><span class="num">3</span><span class="who">Your team</span><h3>Checks and approves</h3><p>Edits each task&rsquo;s instructions, agent, tools and AI model, then saves.</p></div>
+      <div class="step crew-s"><span class="num">4</span><span class="who">Crew</span><h3>Does the research</h3><p>Specialists work at the same time. Tasks that need others&rsquo; results wait for them.</p></div>
+      <div class="step crew-s"><span class="num">5</span><span class="who">Crew</span><h3>Drafts the report</h3><p>One report with sources and gaps called out, ready for review.</p></div>
+      <div class="step you"><span class="num">6</span><span class="who">Your team</span><h3>Asks and refines</h3><p>Asks questions, asks for changes, and decides what to keep.</p></div>
+    </div>
+    <div class="assure">
+      <div class="box"><h3>You approve the plan</h3><ul>
+        <li>A plan with errors, like a tool that doesn&rsquo;t exist, can&rsquo;t be saved</li>
+        <li>With a fixed plan (static mode), runs follow your approved plan</li>
+        <li>Each save makes a new version. Older versions are kept.</li></ul></div>
+      <div class="box"><h3>You approve every change to the report</h3><ul>
+        <li>Changes are suggested one section at a time, with edits marked</li>
+        <li>Accept or keep each section. Nothing changes until you save.</li>
+        <li>Each save makes a new version. The original is always kept.</li></ul></div>
+    </div>
+    <div class="strip" style="margin-top:40px"><svg class="ic"><use href="#i-users"/></svg><span><b>The crew drafts. Your team decides.</b> With a fixed plan, every run follows a plan a person approved. Report changes only count once someone saves them.</span></div>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Human in the loop</span></div>
+  <aside class="notes">
+    <p>This slide answers the question "is this replacing my team?" The answer is no. Orange boxes show where the team acts. Dark boxes show where the crew drafts.</p>
+    <p>The team sets the goal. The planner drafts a plan. The team checks every task before saving: the instructions, which specialist does it, which tools it may use, and which AI model. A plan with errors can't be saved. With a fixed plan (static plan mode, which we recommend as the default), every run follows exactly the plan the team approved. That includes scheduled runs.</p>
+    <p>If a technical person asks: the tool list for each task is checked when the plan is saved and is given to the agent in its instructions. It is not yet enforced by the service while the task runs. This is a known AgentCore limit, D-24 in the Well-Architected review. Each agent can only reach the tools its own harness is allowed, and we keep that list as small as possible.</p>
+    <p>After the run, the team reads the report and can ask it questions. The report assistant answers only from the report and its sources. If the team asks for changes, the assistant suggests them one section at a time and shows exactly what would change. The team accepts each section or keeps the current text. Nothing changes until they save. Each save becomes a new version, and the original report is never overwritten. Only the workflow's owner or an admin can save.</p>
+  </aside>
+</section>
+
+<!-- ===================== 6. See it in action ===================== -->
+<section class="slide" data-title="See it in action">
+  <p class="eyebrow">Walkthrough</p>
+  <h2>See it in action</h2>
+  <div class="sched"><svg class="ic"><use href="#i-repeat"/></svg>Repeat research on a schedule: add one to any saved workflow, such as <code>rate(7 days)</code> for weekly or a <code>cron(...)</code> rule.</div>
+  <div class="body" style="margin-top:24px">
+    <div class="shots">
+      <div class="shot"><div class="frame"><img class="zoom" src="../images/webapp/03-create-workflow.png" alt="Create workflow dialog with a plain-language goal"></div><p class="cap"><b>1</b>Write your goal in plain words</p></div>
+      <div class="shot"><div class="frame"><img src="../images/webapp/04-plan-editor.png" alt="Plan editor showing a drafted task with prompt, worker, tools and model"></div><p class="cap"><b>2</b>Check and edit the draft plan</p></div>
+      <div class="shot"><div class="frame"><img src="../images/webapp/07-run-complete.png" alt="Run detail with per-task status, tokens and duration"></div><p class="cap"><b>3</b>Follow each task&rsquo;s progress, time and AI usage</p></div>
+      <div class="shot wide"><div class="frame"><img src="../images/webapp/08-report.png" alt="Generated campaign brief report"></div><p class="cap"><b>4</b>Read one report with sources, and gaps called out</p></div>
+      <div class="shot"><div class="frame"><img class="chat" src="../images/webapp/11-report-chat-answer.png" alt="Report assistant answering a question with section references"></div><p class="cap"><b>5</b>Ask questions. Answers name the sections used.</p></div>
+    </div>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Screens and numbers are sample AI output for made-up brands, not checked data</span></div>
+  <aside class="notes">
+    <p>These are real screens from the sample deployment. The brands are made up. Velvet Fox is an invented sparkling wine brand. Any market numbers you see in the screenshots, such as growth forecasts or percentages in the report, are sample AI output. They are not checked data and we do not stand behind them. They show what a draft looks like before the team reviews it.</p>
+    <p>One: the user names the workflow and writes the goal the way they would brief a colleague. Two: the planner drafts the plan. Here it put the portfolio expert first, ran four research specialists at the same time, and had the campaign strategist wait for all of them. The user can edit every task before saving. Three: the run page shows each task's status, time taken and token usage as it finishes. This run finished seven tasks in about seven minutes. Four: the report is one brief built from every specialist's work. In this example it clearly says that the made-up brand has no real market presence, instead of inventing one. Five: the report assistant answers from the report and shows which sections it used.</p>
+    <p>For repeat research, such as the weekly competitor watch, add a schedule like rate(7 days). Schedules keep running until someone turns them off.</p>
+  </aside>
+</section>
+
+<!-- ===================== 7. Quick start ===================== -->
+<section class="slide" data-title="Quick start">
+  <p class="eyebrow">Quick start &middot; AWS-native boilerplate</p>
+  <h2>One command to deploy. First run the same day.</h2>
+  <div class="body" style="margin-top:30px">
+    <div class="qs">
+      <div class="qstep"><div class="head"><span class="n">1</span><h3>Save your search API key in Secrets Manager</h3></div>
+<pre>aws secretsmanager create-secret \
+  --name marketing-workflow/tavily-api-key \
+  --secret-string '&lt;your-key&gt;' \
+  --region ap-southeast-2</pre>
+        <p>News and social media keys are optional. Without them, reports say what they couldn&rsquo;t cover.</p></div>
+      <div class="qstep"><div class="head"><span class="n">2</span><h3>Build and deploy with AWS CDK</h3></div>
+<pre>npm install
+npm run build
+cd examples/marketing-workflow
+npx cdk deploy -c modelId=&lt;inference-profile-id&gt; -c removalPolicy=destroy</pre>
+        <p>Use <code>removalPolicy=destroy</code> for trials, so cleanup removes everything. Leave it out when you get closer to production.</p></div>
+      <div class="qstep"><div class="head"><span class="n">3</span><h3>Create a user (users can&rsquo;t sign themselves up)</h3></div>
+<pre>aws cognito-idp admin-create-user --user-pool-id &lt;UserPoolId&gt; \
+  --username &lt;name&gt; --temporary-password '&lt;TempPassw0rd!&gt;'</pre>
+        <p>Add the user to the <code>admin</code> group if they should manage agents and settings.</p></div>
+      <div class="qstep"><div class="head"><span class="n">4</span><h3>Open the web app and run your first goal</h3></div>
+        <p style="font-size:23px;margin-top:16px;color:var(--ink)">Open the <code>WebAppUrl</code> link from the deploy output, sign in, and type a goal. Check the draft plan, save it, and click <b>Run now</b>.</p>
+        <p>Watch each task&rsquo;s status, time and token usage, then read the report.</p></div>
+    </div>
+    <div class="strip" style="margin-top:22px;padding:18px 32px;font-size:25px"><svg class="ic"><use href="#i-layers"/></svg><span><b>Open source (MIT-0):</b> improve it, white-label it, and own your customizations. No license fees and no attribution needed.</span></div>
+    <p class="prereq">You need: Node.js 20 or later, AWS credentials, CDK bootstrapped, and access to Amazon Bedrock AgentCore and Bedrock models in your region (sample default: ap-southeast-2). Commands match the repository README.</p>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Quick start</span></div>
+  <aside class="notes">
+    <p>Now the technical part. You start from ready-made, AWS-native starter code (a boilerplate). Everything is defined in AWS CDK, and one cdk deploy command sets up the whole solution in the customer's account.</p>
+    <p>Step one: save the Tavily search API key in Secrets Manager. It is the only key you need before you deploy. NewsAPI and EnsembleData keys are optional. Without them, reports say what they couldn't cover. Step two: run npm install, build, and cdk deploy with the Bedrock inference profile the customer picks. The solution never guesses a model. The removalPolicy=destroy flag is for trials, so cdk destroy removes everything. Step three: create a Cognito user. People can't sign themselves up, by design. Step four: open the web app link from the deploy output and run a first goal.</p>
+    <p>On timing, say "first run the same day", not a number of minutes. Deploy time depends on the account and region. After deploy, drafting a plan takes a minute or two, and a run usually takes under fifteen minutes. Before you start, check that AgentCore is available in the region and that Bedrock model access is turned on.</p>
+    <p>License: the code is released under MIT No Attribution (MIT-0). Customers and partners can use, copy, change, merge, publish, share, sublicense and sell it, free of charge, with no attribution needed. The copyright notice on the sample itself stays with Amazon. What the customer owns is their own changes and the solutions they build on it. Like any sample, it is provided as is, without warranty. It is not ready for production without the extra work listed on slide 10.</p>
+  </aside>
+</section>
+
+<!-- ===================== 8. Architecture ===================== -->
+<section class="slide" data-title="Architecture on AWS">
+  <p class="eyebrow">Architecture</p>
+  <h2>Serverless and AWS-native, in your own account</h2>
+  <div class="arch">
+    <div class="diagram"><img src="../architecture.svg" alt="Reference architecture: web app, API, plan runner, AgentCore agents, gateway tools, storage"></div>
+    <div class="callouts">
+      <div class="co"><span class="n">1</span><div><h3>AgentCore Harness: the agents</h3><p>Each agent is built from a config file and gets only the permissions it needs.</p></div></div>
+      <div class="co"><span class="n">2</span><div><h3>AgentCore Gateway: one door to tools</h3><p>Agents use every tool through it (MCP). Keys stay in Secrets Manager, hidden from agents.</p></div></div>
+      <div class="co"><span class="n">3</span><div><h3>AWS Step Functions: runs any plan</h3><p>One workflow runs every valid plan, with tasks side by side. By default, one failed task doesn&rsquo;t stop the run. New plans need no new infrastructure.</p></div></div>
+      <div class="co"><span class="n">4</span><div><h3>DynamoDB and S3: records and results</h3><p>Task status, time, AI usage and every output, encrypted with this workload&rsquo;s own KMS key.</p></div></div>
+      <div class="co"><span class="n">5</span><div><h3>Cognito and CloudFront: the web app</h3><p>Sign-in is required for every API call. EventBridge Scheduler runs repeat workflows.</p></div></div>
+    </div>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Architecture</span></div>
+  <aside class="notes">
+    <p>Everything here is serverless and runs in the customer's own account.</p>
+    <p>One: each agent is an Amazon Bedrock AgentCore harness. It is set up from configuration and has its own execution role with only the permissions it needs. Two: agents reach tools through AgentCore Gateway, using MCP, the standard way for AI agents to call tools. Tool API keys stay in Secrets Manager and are read inside the tool layer, so agents never see them. Three: one general-purpose Step Functions workflow runs any plan. It runs tasks in the order their inputs allow, and runs tasks that don't depend on each other at the same time. By default it keeps going when a task fails: the failed task is recorded, tasks that needed it are skipped, and the report notes the gap. It ends with the report step. Because plans are data, a new research workflow needs no new infrastructure. Four: DynamoDB stores workflow, run and task records, including token usage. S3 stores every task output and report. Both are encrypted with a KMS key that belongs to this workload. Five: the React web app is served through CloudFront. Users sign in with Cognito, and every API call needs a Cognito token. EventBridge Scheduler runs the repeat workflows.</p>
+    <p>Heads-up: the diagram is older than the current set of agents, so it still shows old agent labels (web_research, data_analysis, brand_monitoring). The flow is the same. The current ten agents are on slide 4.</p>
+  </aside>
+</section>
+
+<!-- ===================== 9. Customizable ===================== -->
+<section class="slide" data-title="Fully customizable to your organization">
+  <p class="eyebrow">Customization</p>
+  <h2>Fully customizable to your organization</h2>
+  <div class="body" style="margin-top:36px">
+    <div class="levers">
+      <div class="lever"><div class="top"><svg class="ic"><use href="#i-users"/></svg><h3>Agents</h3></div><ul>
+        <li>Admins edit <b>your brand brief</b> and agent instructions in <b>Settings</b>. No redeploy needed.</li>
+        <li>Add, remove or change agents in one YAML file</li></ul></div>
+      <div class="lever"><div class="top"><svg class="ic"><use href="#i-plug"/></svg><h3>Tools</h3></div><ul>
+        <li><b>Built in:</b> web, news and social media search, currency rates, AgentCore Browser and <span style="white-space:nowrap">Code Interpreter</span></li>
+        <li><b>Add your own</b> through AgentCore Gateway, for example CRM, sales or POS data, product catalog</li></ul></div>
+      <div class="lever"><div class="top"><svg class="ic"><use href="#i-chip"/></svg><h3>Models</h3></div><ul>
+        <li>Choose <b>fast, default and deep</b> models from your Bedrock inference profiles</li>
+        <li>The planner suggests a model for each task. Your team can change it.</li></ul></div>
+    </div>
+    <div class="beyond"><svg class="ic"><use href="#i-layers"/></svg><div>
+      <h3>Beyond marketing</h3>
+      <p>A new use case is a few lines of CDK code plus agent settings. The repo&rsquo;s second example, a competitor-snapshot team, fits in one file. A <span style="white-space:nowrap"></span>step-by-step</span> guide takes a new agent from idea to deployed in a day.</p></div></div>
+    <p class="fn">Third-party tools are optional. They call each provider&rsquo;s public API with keys you supply, and each provider&rsquo;s own terms apply. AWS is not affiliated with these providers and does not endorse them.</p>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Customization</span></div>
+  <aside class="notes">
+    <p>This is how the crew is set up for each organization. There are three things you can change.</p>
+    <p>Agents: the portfolio expert holds the brand brief. Admins replace the starter brief in Settings. They can also change any agent's instructions or model without redeploying. The original settings can always be restored. Adding or removing an agent is one entry in a YAML file. The planner learns about a new agent from its description.</p>
+    <p>Tools: built in are web search through Tavily, news through NewsAPI, social media through EnsembleData, and currency rates from ECB reference rates, which need no key. There are also the AgentCore Browser and Code Interpreter. Customer systems such as CRM, sales or POS data, a product catalog, or brand guidelines are added as AgentCore Gateway targets. Each one is either a hosted MCP server or a small Lambda tool with its own secret. These are examples of what you can connect. They are not connectors that come in the box. Amazon Bedrock Knowledge Bases are not included in version 1.</p>
+    <p>Models: at deploy time you choose a default model, plus optional fast and deep models, from the customer's Bedrock inference profiles. The planner suggests a model for each task based on how hard the task is. The team can change it for each task before saving.</p>
+    <p>Beyond marketing: a new use case is one construct call plus agent configuration. The repo's second example is a full competitor-snapshot workload in one file. Third-party tools are optional, use the customer's own keys, and follow each provider's own terms. AWS is not affiliated with these providers and doesn't endorse them.</p>
+  </aside>
+</section>
+
+<!-- ===================== 10. Rollout ===================== -->
+<section class="slide" data-title="Rollout and next steps">
+  <p class="eyebrow">Rollout</p>
+  <h2>Rollout and next steps</h2>
+  <div class="body" style="margin-top:36px">
+    <div class="pillars">
+      <div class="pillar"><div class="top"><svg class="ic"><use href="#i-account"/></svg><h3>One deployment per customer</h3></div><ul>
+        <li>Each customer runs their own copy in <b>their own AWS account</b>, kept apart from other customers</li>
+        <li>Version 1 uses one account and one region. Everyone in a deployment shares one workspace.</li></ul></div>
+      <div class="pillar"><div class="top"><svg class="ic"><use href="#i-lock"/></svg><h3>Security basics</h3></div><ul>
+        <li><b>Only people you add</b> can sign in (Amazon Cognito), with an <b>admin</b> group for settings.</li>
+        <li>Each deployment&rsquo;s data has its own <b>KMS key</b>. The app <b>can&rsquo;t change its own AWS setup</b>.</li></ul></div>
+      <div class="pillar"><div class="top"><svg class="ic"><use href="#i-coin"/></svg><h3>Cost model</h3></div><ul>
+        <li>About <b>$4/month</b> when idle. Updating a report costs one run: <b>AI usage</b> plus any paid data services.</li>
+        <li>See AI usage for each task, run and agent. <b>Add spending limits</b> per brief or per user if you need them.</li></ul></div>
+    </div>
+    <div class="path">
+      <div class="path-title">Path to production</div>
+      <div class="chev">
+        <div>Discovery workshop<span>Use cases, data sources, owners</span></div>
+        <div>Pilot setup<span>Your AWS account and region</span></div>
+        <div>Customize the crew<span>Brand brief, instructions, data</span></div>
+        <div>Try real use cases<span>Team checks every result</span></div>
+        <div>Get production-ready<span>Fix the Well-Architected list</span></div>
+      </div>
+      <p class="harden"><b>Before production:</b> WAF and request limits &middot; prompt-injection guardrails &middot; release pipeline (CI/CD) &middot; cost limits per run &middot; disaster recovery</p>
+    </div>
+    <p class="fn">This is sample code for evaluation. It is not ready for production as-is. Review and fix the Well-Architected findings before you go live.</p>
+  </div>
+  <div class="footer"><span class="brand">AI Research Crew for Marketers</span><span>Next steps</span></div>
+  <aside class="notes">
+    <p>How we roll this out to many customers: each customer gets their own deployment in their own AWS account. That is the only model in version 1, and customers are kept apart by the account boundary. It is not one shared service for many customers. Inside one deployment, everyone who signs in shares one workspace and can read all workflows and reports. Only owners or admins can change them.</p>
+    <p>Security basics: everyone signs in with Cognito, and every API call needs that sign-in. People can't sign themselves up, and an admin group manages agent and organization settings. A KMS key for this workload encrypts the data, stored outputs and logs. The running app can't create AWS infrastructure. The only thing it creates while running is a workflow's schedule.</p>
+    <p>A security reviewer will raise two known gaps. Both are on the Well-Architected list. First, the tool limits for each task are checked when a plan is saved, but they are not enforced while it runs. This is an AgentCore limit, D-24. Until it is fixed, each agent's harness is allowed as few tools as possible. Second, Cognito MFA is not set up. Turn it on before production, at least for the admin group.</p>
+    <p>Cost: an idle deployment costs about four dollars a month (about one dollar for the KMS key and three for the dashboard), plus cents for storage. The real cost is per run: Bedrock AI usage (tokens) plus any paid data services. The app tracks token usage for each task and each run. So updating a report costs one more run, not a new agency project. Remind customers that schedules keep running until someone turns them off.</p>
+    <p>Be exact about what is built in today. Built in: token usage of the worker agents for each task and each run in the app, and Bedrock spend per agent and per workload in Cost Explorer and the Cost and Usage Report (CUR), through cost allocation tags on each agent's IAM role. These tags need a one-time activation in the payer or management account. They don't cover past usage, and the data is about a day behind. Planner token usage and dollar amounts per step are not in the app yet. There is no spending cap per run, per brief or per user built in today. The only limits are plan size and each agent's limits on steps and tokens. We recommend adding AWS Budgets alerts on the workload tag, an alarm on the token usage rate, and a token budget per run in the Step Functions plan runner, which is on the roadmap. Because the code is MIT-0, builders can add spending limits per brief or per user, using the same token records.</p>
+    <p>Path: start with a discovery workshop to pick use cases and data sources. Then set up a pilot. Then customize the agents and tools. Then try the use cases, with the team reviewing every plan and report. Last, prepare for production using the Well-Architected list: a web firewall (WAF) and request limits, guardrails against prompt injection (harmful instructions hidden in web pages or data), an automated release pipeline (CI/CD), cost limits, and disaster recovery. This is sample code and it is not ready for production as-is. Close by agreeing on a date for the discovery workshop and the first two use cases.</p>
+  </aside>
+</section>
+
+</div>
+
+<div id="notes-panel" aria-live="polite"><h4>Speaker notes</h4><div id="notes-body"></div></div>
+<div id="counter"></div>
+<div id="hint">&larr; &rarr; navigate &middot; N notes &middot; F fullscreen</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var stage = document.getElementById('stage');
+  var bar = document.getElementById('progress');
+  var counter = document.getElementById('counter');
+  var notesBody = document.getElementById('notes-body');
+  var notesPanel = document.getElementById('notes-panel');
+  var cur = 0;
+
+  function fromHash() {
+    var n = parseInt((location.hash || '').replace('#', ''), 10);
+    return isNaN(n) ? 0 : n - 1;
+  }
+
+  function go(i) {
+    i = Math.max(0, Math.min(slides.length - 1, i));
+    cur = i;
+    slides.forEach(function (s, k) { s.classList.toggle('active', k === i); });
+    counter.textContent = (i + 1) + ' / ' + slides.length;
+    bar.style.width = ((i + 1) / slides.length * 100) + '%';
+    var n = slides[i].querySelector('.notes');
+    notesBody.innerHTML = n ? n.innerHTML : '';
+    document.title = slides[i].getAttribute('data-title') + ' (' + (i + 1) + '/' + slides.length + ')';
+    if (location.hash !== '#' + (i + 1)) history.replaceState(null, '', '#' + (i + 1));
+  }
+
+  function fit() {
+    var notesH = document.body.classList.contains('notes-on') ? notesPanel.offsetHeight : 0;
+    var w = window.innerWidth, h = window.innerHeight - notesH;
+    var s = Math.min(w / 1920, h / 1080);
+    stage.style.transform = 'translate(' + (w - 1920 * s) / 2 + 'px,' + (h - 1080 * s) / 2 + 'px) scale(' + s + ')';
+  }
+
+  function toggleNotes() { document.body.classList.toggle('notes-on'); fit(); }
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) { (document.documentElement.requestFullscreen || function () {}).call(document.documentElement); }
+    else if (document.exitFullscreen) { document.exitFullscreen(); }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    switch (e.key) {
+      case 'ArrowRight': case 'ArrowDown': case 'PageDown': case 'Enter':
+        e.preventDefault(); go(cur + 1); break;
+      case ' ': case 'Spacebar':
+        e.preventDefault(); go(e.shiftKey ? cur - 1 : cur + 1); break;
+      case 'ArrowLeft': case 'ArrowUp': case 'PageUp': case 'Backspace':
+        e.preventDefault(); go(cur - 1); break;
+      case 'Home': e.preventDefault(); go(0); break;
+      case 'End': e.preventDefault(); go(slides.length - 1); break;
+      case 'n': case 'N': toggleNotes(); break;
+      case 'f': case 'F': toggleFullscreen(); break;
+    }
+  });
+
+  stage.addEventListener('click', function (e) {
+    if (e.target.closest('a, button, pre, code')) return;
+    if (window.getSelection && String(window.getSelection())) return;
+    if (e.clientX < window.innerWidth / 3) go(cur - 1); else go(cur + 1);
+  });
+
+  window.addEventListener('hashchange', function () { var i = fromHash(); if (i !== cur) go(i); });
+  window.addEventListener('resize', fit);
+  document.addEventListener('fullscreenchange', fit);
+  setTimeout(function () { document.getElementById('hint').style.opacity = '0'; }, 6000);
+
+  go(fromHash());
+  fit();
+})();
+</script>
+</body>
+</html>
